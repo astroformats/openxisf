@@ -121,11 +121,12 @@ public:
     }
 
 private:
-    // Records an error that makes the block unavailable, and returns false. In strict mode, the log throws instead.
+    // Records an error that makes the block unavailable, and returns false. In strict mode, the log throws instead. The
+    // block keeps the diagnostic, which the log may not list.
     bool fail(errc code, std::string message, error_context context)
     {
+        block_.problem = diagnostic{.severity = severity::error, .code = code, .message = message, .context = context};
         log_.error(code, std::move(message), std::move(context));
-        block_.problem = log_.entries().back();
         return false;
     }
 
@@ -438,7 +439,13 @@ private:
         const std::uint64_t stored = descriptor_.location.kind == location_kind::attachment ? descriptor_.location.size
                                                                                             : descriptor_.data.size();
         const error_context& context = compression.subblocks.empty() ? compression_context_ : subblocks_context_;
-        return attempt([&compression, stored] { return subblocks_of(compression, stored); }, context).has_value();
+        return attempt(
+                   [&compression, stored] {
+                       detail::check_subblocks(compression, stored);
+                       return true;
+                   },
+                   context)
+            .has_value();
     }
 
     // The bytes of an inline or embedded block are at hand, so they are verified now (spec §10.5); an attached or
@@ -595,6 +602,13 @@ std::vector<data_block> describe_blocks(const unit_outline& outline, const block
         }
     }
     return blocks;
+}
+
+void check_available(const data_block& block)
+{
+    if (!block.descriptor) {
+        throw_unavailable(block);
+    }
 }
 
 std::vector<std::byte> read_stored_block(const thread_safe_source& source, const data_block& block,

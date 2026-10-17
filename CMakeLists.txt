@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(openxisf
-    VERSION 1.0.0
+    VERSION 1.0.1
     DESCRIPTION "C++20 library for reading and writing XISF files"
     HOMEPAGE_URL "https://github.com/openxisf/openxisf"
     LANGUAGES CXX)
@@ -60,11 +60,18 @@ include(GNUInstallDirs)
 include(openxisf_warnings)
 include(openxisf_sanitizers)
 
-# Dependencies come from find_package only. Optional ones are never detected on their own.
+# The programs and the DLL of a shared build go in one directory, where Windows finds the DLL: bin, unless the project
+# that includes this one, or the command line, chose another.
+if(NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+endif()
+
+# Dependencies come from find_package only. Optional ones are never detected on their own. lz4 and zstd are found by
+# the modules of cmake/, which take their CMake packages too, whatever CMAKE_FIND_PACKAGE_PREFER_CONFIG says.
 find_package(pugixml CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
-find_package(lz4 REQUIRED)
-find_package(zstd REQUIRED)
+find_package(lz4 MODULE REQUIRED)
+find_package(zstd MODULE REQUIRED)
 if(OPENXISF_WITH_TBB)
     find_package(TBB CONFIG REQUIRED)
 endif()

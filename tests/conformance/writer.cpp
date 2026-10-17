@@ -44,6 +44,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1185,6 +1186,43 @@ TEST(conformance_writer, the_luminance_of_a_working_space_is_that_of_its_chromat
     EXPECT_FALSE(space.gamma.has_value());
 }
 
+TEST(conformance_writer, the_default_range_of_an_unsigned_integer_image_is_not_written)
+{
+    // Spec §11.5.1: bounds equal to the default range [0, 2^k - 1] of a k-bit image should not be specified. A model
+    // read from another encoder may hold them; it reads back without them, with the same representable range.
+    unit_model model;
+    for (const auto& [format, upper] : std::initializer_list<std::pair<openxisf::sample_format, double>>{
+             {openxisf::sample_format::uint8, 255.0},
+             {openxisf::sample_format::uint16, 65535.0},
+             {openxisf::sample_format::uint32, 4294967295.0},
+             {openxisf::sample_format::uint64, static_cast<double>(std::numeric_limits<std::uint64_t>::max())}}) {
+        image_info image = simple_image(format, {1}, 1);
+        image.bounds = openxisf::bounds{.lower = 0.0, .upper = upper};
+        model.add(image, std::vector<std::byte>(image.data_size()));
+    }
+    // Other bounds are written: a narrower range, and the bounds of a floating point image.
+    image_info narrower = simple_image(openxisf::sample_format::uint16, {1}, 1);
+    narrower.bounds = openxisf::bounds{.lower = 0.0, .upper = 4095.0};
+    model.add(narrower, std::vector<std::byte>(2));
+    image_info floating = simple_image(openxisf::sample_format::float32, {1}, 1);
+    floating.bounds = openxisf::bounds{.lower = 0.0, .upper = 1.0};
+    model.add(floating, std::vector<std::byte>(4));
+
+    const std::vector<std::byte> file = written(model.writer(basic_options()));
+    const auto header = parsed_header(file);
+    std::vector<std::string> written_bounds;
+    for (const pugi::xml_node& element : header->document_element().children("Image")) {
+        written_bounds.emplace_back(element.attribute("bounds").value());
+    }
+    EXPECT_EQ(written_bounds, (std::vector<std::string>{"", "", "", "", "0:4095", "0:1"}));
+    const openxisf::reader unit = open_strictly(file);
+    for (std::size_t i = 0; i < 4; ++i) {
+        EXPECT_FALSE(unit.image(i).bounds.has_value()) << i;
+        EXPECT_EQ(unit.image(i).representable_range(), model.images[i].bounds) << i;
+    }
+    EXPECT_EQ(unit.image(4).bounds, narrower.bounds);
+}
+
 TEST(conformance_writer, strings_that_xml_cannot_hold_go_in_data_blocks)
 {
     const std::vector<std::byte> file = written(rich_model().writer(basic_options()));
@@ -1260,6 +1298,38 @@ TEST(conformance_writer, the_compression_level_is_from_0_to_100)
     }
 }
 
+TEST(conformance_writer, the_codec_and_the_checksum_algorithm_are_among_their_enumerators)
+{
+    // A value cast from another number would be written as another codec or algorithm.
+    for (const openxisf::codec codec : {openxisf::codec::zlib, openxisf::codec::zstd}) {
+        write_options options = basic_options();
+        options.codec = codec;
+        EXPECT_NO_THROW(openxisf::writer output(options));
+    }
+    for (const openxisf::checksum_algorithm algorithm :
+         {openxisf::checksum_algorithm::sha1, openxisf::checksum_algorithm::sha3_512}) {
+        write_options options = basic_options();
+        options.checksum = algorithm;
+        EXPECT_NO_THROW(openxisf::writer output(options));
+    }
+    for (const int value : {4, 9, 255}) {
+        write_options options = basic_options();
+        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange): the value is outside on purpose
+        options.codec = static_cast<openxisf::codec>(value);
+        EXPECT_TRUE(openxisf::test::throws<openxisf::usage_error>(errc::invalid_argument, [&options] {
+            openxisf::writer output(options);
+        })) << value;
+    }
+    for (const int value : {5, 9, 255}) {
+        write_options options = basic_options();
+        // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange): the value is outside on purpose
+        options.checksum = static_cast<openxisf::checksum_algorithm>(value);
+        EXPECT_TRUE(openxisf::test::throws<openxisf::usage_error>(errc::invalid_argument, [&options] {
+            openxisf::writer output(options);
+        })) << value;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Saving to a file (spec §9.6)
 
@@ -1280,6 +1350,8 @@ TEST(conformance_writer, a_file_name_ends_with_xisf)
                                         "bula.Xisf",
                                         ".xisf"}) {
         output.save(directory.file(name));
+        openxisf::test::record_unit(
+            openxisf::test::bytes(openxisf::test::read_file(openxisf::test::path_of(directory.file(name)))));
         const openxisf::reader unit(directory.file(name));
         EXPECT_EQ(unit.image(0), model.images[0]) << name;
     }
@@ -1304,6 +1376,7 @@ TEST(conformance_writer, a_file_is_replaced_only_by_a_complete_unit)
     options.progress = {};
     options.flush_to_disk = true;
     model.writer(options).save(path);
+    openxisf::test::record_unit(openxisf::test::bytes(openxisf::test::read_file(openxisf::test::path_of(path))));
     EXPECT_EQ(openxisf::reader(path).images().size(), model.images.size());
 }
 
@@ -1357,6 +1430,31 @@ TEST(conformance_writer, progress_counts_the_data_of_the_attached_blocks)
         EXPECT_EQ(calls.back(), std::make_pair(entry.total, entry.total));
         EXPECT_TRUE(std::ranges::is_sorted(calls));
     }
+}
+
+// io.h: the exceptions of a progress function pass through unchanged, and a save to a path leaves no file.
+TEST(conformance_writer, the_exceptions_of_a_progress_function_pass_through)
+{
+    const openxisf::test::temp_directory directory;
+    std::uint64_t calls = 0;
+    write_options options = basic_options();
+    // Fails at its second call, once the save has begun.
+    options.progress = [&calls](std::uint64_t /*done*/, std::uint64_t /*total*/) {
+        if (++calls == 2) {
+            throw openxisf::test::injected_fault();
+        }
+        return true;
+    };
+    const unit_model model = rich_model();
+    const openxisf::writer output = model.writer(options);
+    openxisf::memory_sink sink;
+    EXPECT_THROW(output.save(sink), openxisf::test::injected_fault);
+    calls = 0;
+    EXPECT_THROW(output.save(directory.file("unit.xisf")), openxisf::test::injected_fault);
+    EXPECT_EQ(directory.entries(), 0U);
+    calls = 0;
+    EXPECT_THROW(output.save_distributed(directory.file("unit.xish")), openxisf::test::injected_fault);
+    EXPECT_EQ(directory.entries(), 0U);
 }
 
 TEST(conformance_writer, a_save_cancelled_before_it_starts_writes_nothing)

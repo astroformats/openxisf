@@ -15,7 +15,9 @@
 
 #include <gtest/gtest.h>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #endif
 
@@ -126,6 +128,15 @@ TEST_F(file_resolver_test, a_trailing_separator_names_a_directory)
     EXPECT_EQ(open("data.xisb", openxisf::file_resolver(directory() + "/")), "inside");
     EXPECT_TRUE(refuses<openxisf::io_error>("data.xisb/", errc::open_failed));
     EXPECT_TRUE(refuses<openxisf::io_error>("sub/", errc::not_a_regular_file));
+    // Nor does a location whose last step is . or .., and such a step follows a directory, as POSIX resolves a path
+    // (spec §10.3): Windows drops these steps from the text of a path, and the realpath() of macOS skips a . after a
+    // file.
+    EXPECT_TRUE(refuses<openxisf::io_error>("data.xisb/.", errc::open_failed));
+    EXPECT_TRUE(refuses<openxisf::io_error>("data.xisb/..", errc::open_failed));
+    EXPECT_TRUE(refuses<openxisf::io_error>("sub/.", errc::not_a_regular_file));
+    EXPECT_TRUE(refuses<openxisf::io_error>("sub/more.dat/../more.dat", errc::open_failed));
+    EXPECT_TRUE(refuses<openxisf::io_error>("sub/more.dat/./", errc::open_failed));
+    EXPECT_EQ(open("sub/./../sub/more.dat"), "deeper");
 }
 
 TEST_F(file_resolver_test, a_name_in_another_case_names_the_file_where_the_file_system_ignores_case)
@@ -147,14 +158,13 @@ TEST_F(file_resolver_test, refuses_what_is_not_a_regular_file)
 {
     EXPECT_TRUE(refuses<openxisf::io_error>("sub", errc::not_a_regular_file));
 #if defined(_WIN32)
-    // Device names, which Windows reserves in every directory.
-    for (const std::string_view device : {"NUL", "CON", "COM1", "aux", "nul.txt", "LPT1.xisb"}) {
-        try {
-            (void)open(device);
-            ADD_FAILURE() << device << " was opened";
-        } catch (const openxisf::io_error& failure) {
-            EXPECT_TRUE(failure.code() == errc::not_a_regular_file || failure.code() == errc::open_failed) << device;
-        }
+    // Device names, which Windows reserves in every directory, are refused before they are opened, as a device that
+    // cannot be opened is too, such as a serial port that the machine does not have. Since Windows 11, only NUL is one.
+    for (const std::string_view device : {"NUL", "CON", "COM1", "COM9", "aux", "nul.txt", "LPT1.xisb"}) {
+        const errc code = openxisf::test::is_device_name(utf8(unit_directory / path_of(device)))
+                              ? errc::not_a_regular_file
+                              : errc::open_failed;
+        EXPECT_TRUE(refuses<openxisf::io_error>(device, code)) << device;
     }
 #else
     ASSERT_EQ(::mkfifo((unit_directory / "fifo").c_str(), 0600), 0);
@@ -220,6 +230,28 @@ TEST_F(file_resolver_test, the_file_read_is_the_one_whose_canonical_path_was_che
     EXPECT_EQ(open("j/data.xisb"), "inside, in dot.");
     EXPECT_TRUE(refuses<openxisf::unsupported_error>("dot/data.xisb", errc::location_not_allowed));
     EXPECT_TRUE(refuses<openxisf::unsupported_error>("dot./data.xisb", errc::location_not_allowed));
+}
+
+TEST_F(file_resolver_test, the_short_name_of_a_directory_reads_the_file_found_in_it)
+{
+    // The 8.3 alias of a directory longername. inside, beside a junction longername that leads outside: the file read
+    // is the one in longername., which the alias names, not the one that its canonical path names once normalized.
+    const std::filesystem::path outside = root.path() / "outside";
+    std::filesystem::create_directory(outside);
+    write_file(outside / "data.xisb", bytes("outside"));
+    const std::filesystem::path dotted = openxisf::test::long_form(unit_directory / "longername.");
+    std::filesystem::create_directory(dotted);
+    write_file(dotted / "data.xisb", bytes("inside, in longername."));
+    openxisf::test::create_junction(outside, unit_directory / "longername");
+
+    std::wstring alias(MAX_PATH, L'\0');
+    const DWORD size = GetShortPathNameW(dotted.c_str(), alias.data(), static_cast<DWORD>(alias.size()));
+    alias.resize(size < alias.size() ? size : 0);
+    const std::filesystem::path name = std::filesystem::path(alias).filename();
+    if (name.empty() || name == L"longername.") {
+        GTEST_SKIP() << "the volume gives no short names";
+    }
+    EXPECT_EQ(open(utf8(name) + "/data.xisb"), "inside, in longername.");
 }
 #endif
 

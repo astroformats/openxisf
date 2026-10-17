@@ -51,8 +51,8 @@ jobs:
           path: out/coverage
           if-no-files-found: error
 
-  # An hour per fuzz target, from its committed seeds. Findings are uploaded; each one becomes a committed seed once it
-  # is fixed.
+  # An hour per fuzz target, from its committed seeds and the corpus that the targets grew on the nights before.
+  # Findings are uploaded; each one becomes a committed seed once it is fixed.
   fuzz:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.repository.private == false }}
     runs-on: ubuntu-24.04
@@ -74,8 +74,28 @@ jobs:
           cmake --preset linux-clang-fuzz -DCMAKE_CXX_COMPILER=clang++-18 -DOPENXISF_FUZZ_SECONDS=3600
           cmake --build --preset linux-clang-fuzz
 
+      # A cache entry cannot be replaced, so each run saves the corpus under a key of its own, and the next one restores
+      # the newest.
+      - name: Restore the corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            fuzz-corpus-
+
+      # The eight targets at once: each fuzzes for its own hour, so the step takes an hour on any number of processors.
       - name: Fuzz
-        run: ctest --preset linux-clang-fuzz --parallel "$(nproc)"
+        id: fuzz
+        run: ctest --preset linux-clang-fuzz --parallel 8
+
+      # After findings too: the corpus holds the inputs that added coverage, the findings are in the artifacts.
+      - name: Save the corpus
+        if: ${{ !cancelled() && (steps.fuzz.outcome == 'success' || steps.fuzz.outcome == 'failure') }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
 
       # ctest keeps the output of the tests that passed in its log, where each run states the edges it covered.
       - name: Coverage
@@ -89,11 +109,12 @@ jobs:
           path: out/build/linux-clang-fuzz/fuzz/artifacts
           if-no-files-found: ignore
 
-  # The code is endian-correct by design. Big-endian hosts are not supported, but they must keep working.
+  # The code is endian-correct by design. Big-endian hosts are not supported, but they must keep working. The emulated
+  # build and tests take about 40 minutes, so the time limit leaves room for the suite to grow.
   s390x:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.repository.private == false }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

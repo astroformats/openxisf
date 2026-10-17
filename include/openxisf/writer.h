@@ -65,7 +65,7 @@ enum class checksum_algorithm : std::uint8_t
 struct write_options
 {
     /// The application that creates the units: its name and version, such as "MyCapture 2.1"
-    /// (XISF:CreatorApplication). Required.
+    /// (XISF:CreatorApplication). Required, and at most 1 MiB long, since it is written in the header.
     std::string creator_application{};
     /// When the units were created (XISF:CreationTime); the time of each save, to the millisecond, when empty. With a
     /// fixed time, save() writes a model the same way, byte for byte, every time, but for the new UUIDs of
@@ -105,9 +105,11 @@ struct write_options
     std::uint16_t max_inline_block_size = 3072;
     /// Flush a file to the storage device before it replaces its target, so that it survives a power failure. Slower.
     bool flush_to_disk = false;
-    /// Called as a unit is written, and able to cancel the save. Its units of work are the bytes of the data blocks
-    /// before compression: each block counts when it is written, and once more when its checksum or its compressed
-    /// size must be known before the header is written, which a sink that cannot rewrite requires.
+    /// Called as a unit is written, and able to cancel the save. Its units of work are the bytes, before compression,
+    /// of the data blocks written after the header or to the data blocks file; those written in the header do not
+    /// count. Each block counts when it is written, and once more when its checksum or its compressed size must be
+    /// known before the header is written, which a sink that cannot rewrite requires. Saves that run on several
+    /// threads at once call it from each of them, at the same time.
     progress_function progress{};
 };
 
@@ -125,26 +127,40 @@ struct write_options
 /// The writer never signs a unit. A unit read from a signed one is written unsigned, since the writer writes a new
 /// header, which the signature of the old one does not cover (spec §9.5).
 ///
-/// The model is written as it is given, but for what the specification makes an encoder compute: the embedded-profile
-/// flag of each ICC profile is set (bit 0 of byte 47, spec §11.7), and each RGB working space is written with the
-/// luminance coefficients that its chromaticities give (spec §11.8.1), which may differ from those given within the
-/// tolerance that the checks allow. A unit read back holds those values. The writer writes no uid attribute and no
-/// Reference element: what several images share is written for each of them. A String value is written as character
-/// data (spec §11.1.6), or in a data block when XML cannot hold it or it is longer than 1 MiB, since readers limit the
-/// size of a header (limits::max_header_size, 64 MiB by default). A model read from a unit is accepted as
-/// it is when the reader gave no warning, but for an image that a Reference lists again, which has the id of the image
-/// it copies, and a TimePoint whose instant in UTC is beyond the years 0 to 9999 (date_time).
+/// The model is written as it is given, but for what the specification makes an encoder compute or leave out, and
+/// what says nothing: the embedded-profile flag of each ICC profile is set (bit 0 of byte 47, spec §11.7), each RGB
+/// working space is written with the luminance coefficients that its chromaticities give (spec §11.8.1), which may
+/// differ from those given within the tolerance that the checks allow, bounds equal to the default range
+/// [0, 2^k - 1] of an image of k-bit unsigned integers are not written (spec §11.5.1), and neither is a format equal
+/// to property_format{}, the defaults of the specification. A unit read back holds those values, no bounds for such an
+/// image, whose representable range is the same, and no format for such a property or table field. The writer writes
+/// no uid attribute and no Reference element: what several images share is written for each of them. A String value
+/// is written as character data (spec §11.1.6), or in a data block when XML cannot hold it or it is longer than 1 MiB,
+/// since readers limit the size of a header (limits::max_header_size, 64 MiB by default). The writer checks the
+/// specification, not the other limits of readers: a unit whose header has more elements than
+/// limits::max_xml_elements, 1,000,000 by default, as a table of a few hundred thousand rows has, is read back only
+/// with that limit raised (read_options::limits).
+///
+/// A model read from a unit is accepted as it is when the reader gave no warning, but for an image that a Reference
+/// lists again, which has the id of the image it copies, and a TimePoint whose instant in UTC is beyond the years 0 to
+/// 9999 (date_time). A model read with read_options::header_only lacks the ancillary data in data blocks: written as
+/// it is, it loses its ICC profiles and the properties and tables whose values are in data blocks, and its
+/// thumbnails, which have no pixels, are refused (errc::pixel_data_size_mismatch). Call
+/// reader::load_ancillary_data() before writing such a model again.
 ///
 /// save() checks the whole model against the specification before it writes anything, and throws validation_error,
-/// naming the object, for the first violation. The pixel data are borrowed: they must stay valid and unchanged until
-/// the last save(). A writer is thread-compatible, like a standard container: save() can run on several threads at
-/// once, and a change needs exclusive access. It can be moved, and a moved-from writer can only be destroyed or
-/// assigned to.
+/// naming the object, for the first violation. The properties of an astrometric solution are the exception: the writer
+/// checks their types, as those of any reserved property, and keeps them as given, without checking the solution that
+/// they make, such as a distortion model of one direction alone (astrometric_solution). The pixel data are borrowed:
+/// they must stay valid and unchanged until the last save(). A writer is thread-compatible, like a standard container:
+/// save() can run on several threads at once, and a change needs exclusive access. It can be moved, and a moved-from
+/// writer can only be destroyed or assigned to.
 class OPENXISF_API writer
 {
 public:
     /// A writer of units with the given options.
-    /// @throws usage_error when options.compression_level is outside 0 to 100.
+    /// @throws usage_error when options.compression_level is outside 0 to 100, or options.codec or options.checksum
+    ///         holds a value outside its enumeration.
     explicit writer(write_options options);
 
     writer(const writer&) = delete;
@@ -177,7 +193,9 @@ public:
     /// @throws usage_error when pixels does not have info.data_size() bytes.
     std::size_t add_image(image_info info, std::span<const std::byte> pixels);
 
-    /// Adds an image with its samples as values of T, the type of its sample format (sample_format_of<T>()).
+    /// Adds an image with its samples as values of T, the type of its sample format (sample_format_of<T>()). T is not
+    /// deduced from a span of samples that are not const, such as std::span(samples) of a std::vector<float> that is
+    /// not const: give it as std::span<const float>(samples).
     /// @throws usage_error when T is another type, or samples does not hold the samples of the image.
     template <pixel_sample T> std::size_t add_image(image_info info, std::span<const T> samples)
     {
@@ -189,10 +207,12 @@ public:
     [[nodiscard]] std::span<const image_info> images() const noexcept;
 
     /// Writes the unit to the file at path, which is UTF-8 on every platform and ends with .xisf (spec §9.6). The file
-    /// is replaced only once it is complete: a failed or cancelled save leaves the old file, or none.
+    /// is replaced as file_sink replaces it, only once it is complete: a failed or cancelled save leaves the old file,
+    /// or none.
     /// @throws usage_error when path is empty, not valid UTF-8, or does not end with .xisf in any case.
     /// @throws validation_error when the unit violates the specification; nothing is written then.
-    /// @throws io_error when the file cannot be written, or when the system provides no random data for the name of
+    /// @throws io_error when the file cannot be written, when path names a directory, a FIFO, a socket or a device
+    ///         (errc::not_a_regular_file, see file_sink), or when the system provides no random data for the name of
     ///         the temporary file or for UUIDs (errc::entropy_unavailable).
     /// @throws unsupported_error when a codec or the hashing library fails for another reason than the data, such as
     ///         a library of another version (errc::codec_failure, errc::hash_failure).
@@ -200,9 +220,11 @@ public:
     void save(std::string_view path) const;
 
     /// Writes the unit to sink, then calls its finish(), with the exceptions of the other save(). Exceptions of the
-    /// sink pass through unchanged. A sink that can rewrite (output_sink::can_rewrite()) is written once, with the
-    /// header written last; any other sink receives the unit in order, so compressed blocks are held in memory until
-    /// the header is written.
+    /// sink pass through unchanged. The sink receives the unit in order, the header first, unless blocks attached
+    /// after the header are to be compressed or given checksums (write_options::codec, write_options::checksum), whose
+    /// sizes or digests the header lists: a sink that can rewrite (output_sink::can_rewrite()) then receives room for
+    /// the header, the blocks as they are encoded, and the header last, with rewrite(); any other sink receives the
+    /// unit in order once every block is encoded, so compressed blocks are held in memory until the header is written.
     /// @throws usage_error when sink already holds bytes (output_sink::position() is not 0): every position in a unit
     ///         counts from its first byte, so a sink receives one unit, from its start.
     void save(output_sink& sink) const;
@@ -224,8 +246,9 @@ public:
     /// Writes the unit as a distributed unit to two sinks, with the exceptions of the other save_distributed(): the
     /// header file to header, and the data blocks file to blocks, whose path from the directory of the header file is
     /// blocks_path, in UNIX syntax (spec §10.3), ending with .xisb. Both sinks are written completely before blocks,
-    /// then header, is finished. A sink of blocks that can rewrite is written once, with the block index written last;
-    /// any other sink of blocks receives the file in order, so compressed blocks are held in memory first.
+    /// then header, is finished. The sink of blocks receives the file in order, the block index first, unless its
+    /// blocks are to be compressed or given checksums: a sink of blocks that can rewrite then receives the block index
+    /// last, with rewrite(), and compressed blocks are otherwise held in memory first, as save() holds them.
     /// @throws usage_error when header and blocks are the same sink, when either already holds bytes, or when
     ///         blocks_path is not a relative path in UNIX syntax that ends with .xisb in any case: empty, absolute,
     ///         with a . or .. step, a backslash, a control character, or U+FFFE or U+FFFF, which XML cannot hold.

@@ -8,12 +8,15 @@
 #include "algorithms/astrometric_model.h"
 #include "model/property_catalog.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace openxisf {
@@ -145,16 +148,18 @@ std::optional<image_point> astrometric_solution::celestial_to_image(celestial_po
 
 std::size_t remove_astrometric_solution(property_list& properties)
 {
-    std::vector<std::string> ids;
-    for (const property& item : properties) {
-        if (detail::is_astrometric_solution_id(item.id)) {
-            ids.push_back(item.id);
-        }
+    const auto in_namespace = [](const property& item) { return detail::is_astrometric_solution_id(item.id); };
+    const auto removed = static_cast<std::size_t>(std::ranges::count_if(properties, in_namespace));
+    if (removed == 0) {
+        return 0;
     }
-    for (const std::string& id : ids) {
-        properties.erase(id);
-    }
-    return ids.size();
+    // The other properties are copied in one pass, where erasing each property of the namespace would go through the
+    // list again, and the list is replaced only then, so that a failure leaves it as it was.
+    std::vector<property> kept;
+    kept.reserve(properties.size() - removed);
+    std::ranges::remove_copy_if(properties, std::back_inserter(kept), in_namespace);
+    properties = property_list(std::move(kept));
+    return removed;
 }
 
 } // namespace openxisf

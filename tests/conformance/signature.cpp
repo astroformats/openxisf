@@ -169,8 +169,7 @@ TEST(conformance_signature, a_unit_that_xml_signature_tooling_signed_is_read_wit
     const std::string unit = openxisf::test::read_file(openxisf::test::path_of(path));
     const reader file(path, {.strict = true});
 
-    EXPECT_TRUE(
-        single_diagnostic(file.diagnostics(), severity::info, errc::signature_not_verified, "/ds:Signature[1]"));
+    EXPECT_TRUE(single_diagnostic(file.diagnostics(), severity::info, errc::signature_not_verified, "/Signature[1]"));
     EXPECT_EQ(file.signed_xml(), root_element(unit));
     constexpr std::string_view end_tag = "</ds:Signature>";
     const std::size_t start = unit.find("<ds:Signature ");
@@ -207,8 +206,6 @@ struct malformed_case
     std::string_view name{};
     /// The signature as written, which ends the header.
     std::string_view signature{};
-    /// The path of the signature in the diagnostics.
-    std::string_view path = "/Signature[1]";
 };
 
 constexpr std::array malformed_signatures{
@@ -226,10 +223,10 @@ constexpr std::array malformed_signatures{
     malformed_case{.name = "an attribute given twice",
                    .signature = R"(<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo Id="a" Id="b"/>)"
                                 R"(</Signature>)"},
+    // Its path leaves out the prefix, as every path does.
     malformed_case{.name = "a prefix",
                    .signature = R"(<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo>)"
-                                R"(</ds:Signature>)",
-                   .path = "/ds:Signature[1]"},
+                                R"(</ds:Signature>)"},
 };
 
 TEST(conformance_signature, a_signature_that_is_not_well_formed_is_returned_as_written_and_reading_goes_on)
@@ -241,8 +238,7 @@ TEST(conformance_signature, a_signature_that_is_not_well_formed_is_returned_as_w
         EXPECT_EQ(file.signature(), signature_status::not_verified) << tested.name;
         EXPECT_EQ(file.signature_xml(), tested.signature) << tested.name;
         EXPECT_EQ(file.signed_xml(), root_element(header)) << tested.name;
-        EXPECT_TRUE(signed_with_warning(file.diagnostics(), errc::invalid_signature, tested.path, tested.path))
-            << tested.name;
+        EXPECT_TRUE(signed_with_warning(file.diagnostics(), errc::invalid_signature, "/Signature[1]")) << tested.name;
         ASSERT_EQ(file.diagnostics().size(), 2U) << tested.name;
         EXPECT_TRUE(file.diagnostics()[1].context.offset.has_value()) << tested.name;
         EXPECT_EQ(file.read_pixels(0), bytes("abc")) << tested.name;
@@ -278,7 +274,7 @@ TEST(conformance_signature, the_signature_names_the_root_element_by_its_id_attri
           R"(<ds:Reference URI="#XISFRootElement"/><ds:Reference URI="#Object"/>)"}) {
         const reader file = open_header(signed_header() + with_reference(reference));
         EXPECT_TRUE(
-            single_diagnostic(file.diagnostics(), severity::info, errc::signature_not_verified, "/ds:Signature[1]"))
+            single_diagnostic(file.diagnostics(), severity::info, errc::signature_not_verified, "/Signature[1]"))
             << reference;
     }
 
@@ -287,8 +283,8 @@ TEST(conformance_signature, the_signature_names_the_root_element_by_its_id_attri
          {R"(<ds:Reference URI="#Object"/>)", R"(<ds:Reference URI=""/>)",
           R"(<Reference xmlns="urn:example" URI="#XISFRootElement"/>)", R"(<ds:Reference/>)", ""}) {
         const reader file = open_header(signed_header() + with_reference(reference));
-        EXPECT_TRUE(signed_with_warning(file.diagnostics(), errc::invalid_signature,
-                                        "/ds:Signature[1]/ds:SignedInfo[1]", "/ds:Signature[1]"))
+        EXPECT_TRUE(signed_with_warning(file.diagnostics(), errc::invalid_signature, "/Signature[1]/SignedInfo[1]",
+                                        "/Signature[1]"))
             << reference;
     }
 

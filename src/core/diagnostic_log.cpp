@@ -3,6 +3,7 @@
 
 #include "core/diagnostic_log.h"
 
+#include <string>
 #include <utility>
 
 namespace openxisf::detail {
@@ -71,12 +72,29 @@ void diagnostic_log::error(errc code, std::string message, error_context context
 
 std::vector<diagnostic> diagnostic_log::release() noexcept
 {
+    unlisted_ = 0;
     return std::exchange(entries_, {});
 }
 
 void diagnostic_log::add(openxisf::severity level, errc code, std::string message, error_context context)
 {
-    entries_.push_back({.severity = level, .code = code, .message = std::move(message), .context = std::move(context)});
+    if (entries_.size() < max_diagnostics) {
+        entries_.push_back(
+            {.severity = level, .code = code, .message = std::move(message), .context = std::move(context)});
+        return;
+    }
+    diagnostic& last = entries_.back();
+    if (unlisted_ == 0) {
+        // The problem that the last entry was about.
+        unlisted_ = 1;
+        last.context = {};
+    }
+    ++unlisted_;
+    if (level > last.severity) {
+        last.severity = level;
+        last.code = code;
+    }
+    last.message = std::to_string(unlisted_) + " more problems were found, which are not listed";
 }
 
 } // namespace openxisf::detail

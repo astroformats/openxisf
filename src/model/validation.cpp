@@ -11,6 +11,7 @@
 #include "core/uuid.h"
 #include "model/ancillary_attributes.h"
 #include "model/format_specifier.h"
+#include "model/header_tree.h"
 #include "model/image_attributes.h"
 #include "model/outline.h"
 #include "model/property_catalog.h"
@@ -206,12 +207,35 @@ void check_properties(const property_list& properties, const std::vector<table>&
     }
 }
 
+// The values of the Image namespace that an image or a thumbnail has, which spec §11.5.3.5 restricts.
+void check_image_values(const property_list& properties, const std::string& parent)
+{
+    std::size_t position = 0;
+    for (const property& item : properties) {
+        ++position;
+        if (const std::optional<std::string> problem = forbidden_image_value(item)) {
+            fail(errc::invalid_property, *problem, parent + "/" + id_step("Property", item.id, position), "value");
+        }
+    }
+    if (properties.contains("Image:SubgroupId") && !properties.contains("Image:GroupId")) {
+        fail(errc::invalid_property, std::string(subgroup_without_group),
+             parent + "/" + id_step("Property", "Image:SubgroupId", 0), "id");
+    }
+}
+
 void check_metadata(const property_list& metadata, const write_options& options)
 {
     const std::string element = "/xisf/Metadata";
     const std::string application = element + "/Property[@id='XISF:CreatorApplication']";
-    check_text(options.creator_application, application, "value", "the creator application");
     const std::string& name = options.creator_application;
+    // The writer writes it in the header, as character data, where a String of that length fits.
+    if (name.size() > max_character_data) {
+        fail(errc::invalid_metadata,
+             "XISF:CreatorApplication has " + std::to_string(name.size()) + " bytes, and the writer writes at most " +
+                 std::to_string(max_character_data) + " (1 MiB) in the header",
+             application, "value");
+    }
+    check_text(name, application, "value", "the creator application");
     const bool has_digit = std::ranges::any_of(name, [](char c) { return c >= '0' && c <= '9'; });
     // A letter of ASCII, or a byte of a character beyond it.
     const bool has_name = std::ranges::any_of(name, [](char c) {
@@ -320,9 +344,8 @@ void check_working_space(const std::optional<rgb_working_space>& space, const st
                  element, "Y");
         }
     }
-    // The coefficients that the chromaticities give are written, and a white just outside the triangle of the primaries
-    // gives one below 0, within the tolerance of a 0 given.
-    if (!std::ranges::all_of(derived, [](double value) { return value >= 0.0 && value <= 1.0; })) {
+    // The coefficients that the chromaticities give are written.
+    if (!derived_luminance_in_range(derived)) {
         fail(errc::invalid_rgb_working_space,
              "the luminance coefficients that the chromaticities give, which the writer writes, are not in [0, 1] "
              "(spec §8.5.4.1)",
@@ -412,6 +435,7 @@ template <typename Image> void check_common(const Image& image, const std::strin
         }
     }
     check_properties(image.properties, image.tables, element);
+    check_image_values(image.properties, element);
     check_keywords(image.fits_keywords, element);
     check_icc_profile(image.icc_profile, element);
     check_working_space(image.rgb_working_space, element);

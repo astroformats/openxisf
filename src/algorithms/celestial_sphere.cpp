@@ -85,20 +85,26 @@ std::optional<double> native_pole_latitude(double delta_0, native_point referenc
         }
         return std::clamp(pole_native.theta, -90.0, 90.0);
     }
-    const double ratio = sin_degrees(delta_0) / z;
+    const double sin_0 = sin_degrees(delta_0);
+    const double ratio = sin_0 / z;
     if (!(std::abs(ratio) <= 1.0 + ratio_tolerance)) {
         return std::nullopt;
     }
     const double base = arg(cos_degrees(theta_0) * cos_degrees(dphi), sin_degrees(theta_0));
-    const double spread = std::acos(std::clamp(ratio, -1.0, 1.0)) * r;
+    // arccos(sin δ0 / z) in its arctangent form, atan2(√(z² - sin² δ0), sin δ0), with z² - sin² δ0 written as
+    // cos² δ0 - (cos θ0 sin Δφ)², whose terms keep their precision: near a celestial pole the ratio approaches 1, where
+    // the arccosine lost about 3e-15/ε degrees ε radians from the pole.
+    const double cos_0 = cos_degrees(delta_0);
+    const double c = std::abs(cos_degrees(theta_0) * sin_degrees(dphi));
+    const double spread = std::atan2(std::sqrt(std::max((cos_0 - c) * (cos_0 + c), 0.0)), sin_0) * r;
     const double first = reduce_longitude(base + spread);
     const double second = reduce_longitude(base - spread);
     const bool first_valid = std::abs(first) <= 90.0 + range_tolerance;
     const bool second_valid = std::abs(second) <= 90.0 + range_tolerance;
     double chosen = first;
     if (first_valid && second_valid) {
-        // The one closest to θp.
-        if (std::abs(second - pole_native.theta) < std::abs(first - pole_native.theta)) {
+        // The one closest to θp, and the second on a tie, as WCSLIB's celset() chooses.
+        if (std::abs(second - pole_native.theta) <= std::abs(first - pole_native.theta)) {
             chosen = second;
         }
     } else if (second_valid) {

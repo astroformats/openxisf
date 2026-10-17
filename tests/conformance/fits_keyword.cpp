@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -35,9 +36,9 @@ reader open_body(std::string_view body, openxisf::read_options options = {})
 }
 
 // An image whose only content is the keyword with the given attributes.
-reader open_keyword(std::string_view attributes)
+reader open_keyword(std::string_view attributes, openxisf::read_options options = {})
 {
-    return open_body(image_xml({}, "<FITSKeyword " + std::string(attributes) + "/>"));
+    return open_body(image_xml({}, "<FITSKeyword " + std::string(attributes) + "/>"), std::move(options));
 }
 
 TEST(conformance_fits_keyword, an_image_has_its_keywords_in_order)
@@ -107,6 +108,29 @@ TEST(conformance_fits_keyword, a_name_outside_the_fits_grammar_is_kept_with_a_wa
                                   "/xisf/Image[1]/FITSKeyword[1]"));
     ASSERT_EQ(file.image(0).fits_keywords.size(), 1U);
     EXPECT_EQ(file.image(0).fits_keywords[0].name, "object");
+}
+
+TEST(conformance_fits_keyword, a_name_padded_with_spaces_is_read_without_them_with_a_warning)
+{
+    // Spec §11.6.1: names must not be padded, which the first edition did not say, so older encoders may pad them to
+    // eight characters. FITS names are left-justified without spaces inside, so trailing spaces are padding.
+    const reader file = open_keyword(R"(name="EXPTIME " value="300." comment="")", {.strict = true});
+    ASSERT_TRUE(single_diagnostic(file.diagnostics(), severity::warning, errc::invalid_fits_keyword,
+                                  "/xisf/Image[1]/FITSKeyword[1]"));
+    EXPECT_EQ(file.diagnostics()[0].context.attribute, "name");
+    EXPECT_NE(file.diagnostics()[0].message.find("padded"), std::string::npos) << file.diagnostics()[0].message;
+    ASSERT_EQ(file.image(0).fits_keywords.size(), 1U);
+    EXPECT_EQ(file.image(0).fits_keywords[0].name, "EXPTIME");
+
+    // A name that only padding makes is the blank keyword, and one outside the grammar stays outside it.
+    for (const auto& [attributes, name] : std::initializer_list<std::pair<std::string_view, std::string_view>>{
+             {R"(name="        " value="" comment="")", ""}, {R"(name="ob ject  " value="1" comment="")", "ob ject"}}) {
+        const reader other = open_keyword(attributes);
+        EXPECT_TRUE(single_diagnostic(other.diagnostics(), severity::warning, errc::invalid_fits_keyword,
+                                      "/xisf/Image[1]/FITSKeyword[1]"))
+            << attributes;
+        EXPECT_EQ(other.image(0).fits_keywords.at(0).name, name);
+    }
 }
 
 TEST(conformance_fits_keyword, the_blank_keyword_is_kept_with_a_warning)

@@ -528,7 +528,18 @@ std::string_view check_float128(std::string_view text)
     if (!scanned) {
         throw invalid_data_error(errc::invalid_float, quote(text) + " is not a floating point value");
     }
-    if (scanned->kind == float_kind::number && beyond_float128(*scanned)) {
+    // Spec §8.3.3: encoders should write a non-finite value as NaN, +Inf or -Inf; the sign of a NaN means nothing.
+    switch (scanned->kind) {
+    case float_kind::nan:
+        return "NaN";
+    case float_kind::positive_infinity:
+        return "+Inf";
+    case float_kind::negative_infinity:
+        return "-Inf";
+    case float_kind::number:
+        break;
+    }
+    if (beyond_float128(*scanned)) {
         throw_out_of_range(text, "Float128");
     }
     return trim_white_space(text);

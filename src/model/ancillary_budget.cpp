@@ -75,6 +75,14 @@ std::optional<std::vector<std::byte>> load_block(const thread_safe_source& sourc
         log.error(failure.code(), failure.what(), std::move(context));
     } catch (const invalid_data_error& failure) {
         log.error(failure.code(), failure.what(), std::move(context));
+    } catch (const io_error& failure) {
+        // The source of an external file fails as when its block index is read: the block is unavailable, and a strict
+        // open throws the io_error with its code and system error. One of the unit's own source fails the open.
+        if (!is_external(descriptor.location.kind)) {
+            throw;
+        }
+        log.error(failure.code(), failure.what(), std::move(context),
+                  {.raised = error_origin::kind::io, .system_code = failure.system_code()});
     }
     // Nothing is held, so a block that fails takes no room from those after it.
     budget.release(cost);

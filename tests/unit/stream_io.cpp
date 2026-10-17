@@ -30,6 +30,7 @@
 #include <streambuf>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -82,6 +83,42 @@ protected:
         return -1;
     }
 };
+
+// A buffer that writes until it is told to fail, like a medium that fails after the first bytes.
+class failing_later_buffer : public std::stringbuf
+{
+public:
+    void fail() noexcept
+    {
+        failing_ = true;
+    }
+
+protected:
+    std::streamsize xsputn(const char* source, std::streamsize count) override
+    {
+        if (failing_) {
+            throw injected_fault();
+        }
+        return std::stringbuf::xsputn(source, count);
+    }
+
+private:
+    bool failing_ = false;
+};
+
+// Makes the descriptor of stream that of another stream, from now on, as dup2() does: what stream has buffered goes
+// there when it is flushed.
+void redirect(std::FILE* stream, std::FILE* other)
+{
+#if defined(_WIN32)
+    const int moved = _dup2(_fileno(other), _fileno(stream));
+#else
+    const int moved = ::dup2(::fileno(other), ::fileno(stream));
+#endif
+    if (moved < 0) {
+        throw std::runtime_error("cannot redirect a stream");
+    }
+}
 
 // A buffer whose first read throws, like a device that fails once.
 class failing_once_buffer : public std::stringbuf
@@ -207,6 +244,51 @@ private:
     std::string content_;
 };
 
+// A buffer over a string of a fixed size that seeks with seekoff() alone, as many buffers written by hand do: the
+// seekpos() of std::streambuf fails.
+class seekoff_only_buffer : public std::streambuf
+{
+public:
+    explicit seekoff_only_buffer(std::string content) : content_(std::move(content))
+    {
+        char* begin = content_.data();
+        setg(begin, begin, begin + content_.size());
+        setp(begin, begin + content_.size());
+    }
+
+    [[nodiscard]] const std::string& content() const noexcept
+    {
+        return content_;
+    }
+
+protected:
+    pos_type seekoff(off_type offset, std::ios::seekdir direction, std::ios::openmode which) override
+    {
+        const auto size = static_cast<off_type>(content_.size());
+        off_type base = 0;
+        if (direction == std::ios::cur) {
+            base = (which & std::ios::out) != 0 ? pptr() - pbase() : gptr() - eback();
+        } else if (direction == std::ios::end) {
+            base = size;
+        }
+        const off_type target = base + offset;
+        if (target < 0 || target > size) {
+            return {off_type{-1}};
+        }
+        if ((which & std::ios::in) != 0) {
+            setg(eback(), eback() + target, egptr());
+        }
+        if ((which & std::ios::out) != 0) {
+            setp(pbase(), epptr());
+            pbump(static_cast<int>(target));
+        }
+        return {target};
+    }
+
+private:
+    std::string content_;
+};
+
 TEST(stdio_source, reads_from_its_start_position_to_the_end)
 {
     const temp_directory directory;
@@ -286,6 +368,26 @@ TEST(stdio_sink, a_stream_that_cannot_be_written_is_write_failed)
     EXPECT_EQ(sink.position(), 0U);
 }
 
+TEST(stdio_sink, a_rewrite_or_a_finish_that_cannot_write_is_write_failed)
+{
+    // The bytes that the stream buffered are written when a rewrite seeks or when the sink finishes, by then to a
+    // descriptor that only reads, like a medium that fails after the first bytes.
+    const temp_directory directory;
+    write_file(directory.path() / "read_only.bin", bytes("x"));
+    for (const bool rewrite : {true, false}) {
+        const c_file file(directory.path() / "unit.xisf", "w+b");
+        openxisf::stdio_sink sink(file.get());
+        sink.write(bytes("0123456789"));
+        const c_file read_only(directory.path() / "read_only.bin", "rb");
+        redirect(file.get(), read_only.get());
+        if (rewrite) {
+            EXPECT_TRUE(throws<io_error>(errc::write_failed, [&] { sink.rewrite(2, bytes("ab")); }));
+        } else {
+            EXPECT_TRUE(throws<io_error>(errc::write_failed, [&] { sink.finish(); }));
+        }
+    }
+}
+
 TEST(stdio_sink, writes_a_stream_that_cannot_seek_in_order)
 {
     pipe_streams pipe;
@@ -323,6 +425,22 @@ TEST(istream_source, reads_from_its_start_position_to_the_end)
     EXPECT_TRUE(throws<io_error>(errc::end_of_data, [&] { source.read(7, destination); }));
 }
 
+TEST(istream_source, reads_a_buffer_that_seeks_by_offset_alone)
+{
+    // The source seeks the way it measured the stream, from its start, with seekoff().
+    seekoff_only_buffer buffer("header0123456789");
+    std::istream stream(&buffer);
+    stream.seekg(6, std::ios::beg);
+    const openxisf::istream_source source(stream);
+    std::array<std::byte, 4> destination{};
+
+    EXPECT_EQ(source.size(), 10U);
+    source.read(6, destination);
+    EXPECT_EQ(text(destination), "6789");
+    source.read(0, destination);
+    EXPECT_EQ(text(destination), "0123");
+}
+
 TEST(istream_source, refuses_a_stream_that_cannot_seek)
 {
     append_only_buffer buffer;
@@ -343,6 +461,18 @@ TEST(istream_source, a_stream_that_ends_early_is_end_of_data_and_one_that_fails_
 
     EXPECT_TRUE(throws<io_error>(errc::end_of_data, [&] { ending_source.read(0, destination); }));
     EXPECT_TRUE(throws<io_error>(errc::read_failed, [&] { failing_source.read(0, destination); }));
+}
+
+TEST(istream_source, the_exceptions_of_a_stream_that_asks_for_them_pass_through)
+{
+    // stream_io.h: with badbit in the exceptions() mask, the stream rethrows what its buffer throws.
+    failing_buffer content("0123456789");
+    std::istream stream(&content);
+    stream.exceptions(std::ios::badbit);
+    const openxisf::istream_source source(stream);
+    std::array<std::byte, 4> destination{};
+
+    EXPECT_THROW(source.read(0, destination), injected_fault);
 }
 
 TEST(istream_source, reads_again_after_a_failed_read)
@@ -375,6 +505,22 @@ TEST(ostream_sink, writes_and_rewrites_from_its_start_position)
     EXPECT_EQ(stream.str(), "prefix01ab456789!");
 }
 
+TEST(ostream_sink, rewrites_a_buffer_that_seeks_by_offset_alone)
+{
+    seekoff_only_buffer buffer("prefix................");
+    std::ostream stream(&buffer);
+    stream.seekp(6, std::ios::beg);
+    openxisf::ostream_sink sink(stream);
+
+    EXPECT_TRUE(sink.can_rewrite());
+    sink.write(bytes("0123456789"));
+    sink.rewrite(2, bytes("ab"));
+    sink.write(bytes("!"));
+    sink.finish();
+
+    EXPECT_EQ(buffer.content(), "prefix01ab456789!.....");
+}
+
 TEST(ostream_sink, cannot_rewrite_a_stream_that_cannot_seek)
 {
     append_only_buffer buffer;
@@ -403,6 +549,24 @@ TEST(ostream_sink, a_stream_that_fails_is_write_failed)
     std::ostream flushing(&flushed);
     openxisf::ostream_sink finishing(flushing);
     EXPECT_TRUE(throws<io_error>(errc::write_failed, [&] { finishing.finish(); }));
+
+    failing_later_buffer rewritten;
+    std::ostream rewriting(&rewritten);
+    openxisf::ostream_sink rewriting_sink(rewriting);
+    rewriting_sink.write(bytes("0123456789"));
+    rewritten.fail();
+    EXPECT_TRUE(throws<io_error>(errc::write_failed, [&] { rewriting_sink.rewrite(2, bytes("ab")); }));
+}
+
+TEST(ostream_sink, the_exceptions_of_a_stream_that_asks_for_them_pass_through)
+{
+    // stream_io.h: with badbit in the exceptions() mask, the stream rethrows what its buffer throws.
+    failing_buffer buffer;
+    std::ostream stream(&buffer);
+    stream.exceptions(std::ios::badbit);
+    openxisf::ostream_sink sink(stream);
+
+    EXPECT_THROW(sink.write(bytes("abc")), injected_fault);
 }
 
 } // namespace

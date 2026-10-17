@@ -193,7 +193,7 @@ private:
         // The subblocks must account for every byte of the block, now that its stored size is known (spec §10.6).
         if (const std::optional<block_compression>& compression = descriptor.compression) {
             try {
-                (void)subblocks_of(*compression, location.size);
+                check_subblocks(*compression, location.size);
             } catch (const invalid_data_error& failure) {
                 const char* attribute = compression->subblocks.empty() ? "compression" : "subblocks";
                 fail(block, failure.code(), failure.what(), attribute);
@@ -276,12 +276,13 @@ private:
     }
 
     // Makes the block unavailable, with an error, which a read of the block throws again as origin says. In strict
-    // mode, the log throws instead.
+    // mode, the log throws instead. The block keeps the diagnostic, which the log may not list.
     bool fail(data_block& block, errc code, std::string message, const char* attribute = "location",
               const error_origin& origin = {})
     {
+        block.problem = diagnostic{
+            .severity = severity::error, .code = code, .message = message, .context = context_of(block, attribute)};
         log_.error(code, std::move(message), context_of(block, attribute), origin);
-        block.problem = log_.entries().back();
         block.origin = origin;
         block.descriptor.reset();
         return false;

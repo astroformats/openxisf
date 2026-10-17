@@ -4,6 +4,7 @@
 #include <openxisf/error.h>
 #include <openxisf/io.h>
 
+#include "io/native_file.h"
 #include "support/bytes.h"
 #include "support/faulty_io.h"
 #include "support/files.h"
@@ -20,12 +21,17 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -207,6 +213,48 @@ TEST(file_source, refuses_directories_and_devices)
     EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&] { file_source source(device); }));
 }
 
+#if defined(_WIN32)
+TEST(file_source, refuses_the_device_names_of_windows_in_any_directory)
+{
+    // Such a name is refused before it is opened, as a device that cannot be opened is too, such as a serial port that
+    // the machine does not have; one that Windows does not take for a device is a file like any other.
+    const temp_directory directory;
+    int devices = 0;
+    for (const std::string_view name :
+         {"NUL", "nul", "NUL.xisb", "CON", "AUX", "PRN", "COM1", "COM9", "COM9.xisb", "LPT1", "LPT9"}) {
+        const std::string path = directory.file(name);
+        if (openxisf::test::is_device_name(path)) {
+            ++devices;
+            EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&path] { file_source source(path); })) << name;
+        } else {
+            EXPECT_TRUE(throws<io_error>(errc::open_failed, [&path] { file_source source(path); })) << name;
+        }
+    }
+    EXPECT_GE(devices, 2);
+}
+
+TEST(file_source, refuses_the_root_of_a_drive_or_a_share)
+{
+    // The system refuses to open a root with other errors than for a directory, which it is.
+    const temp_directory directory;
+    const std::string local = utf8(directory.path());
+    if (local.size() < 3 || local[1] != ':' || local[2] != '\\') {
+        GTEST_SKIP() << "the temporary directory is not on a drive";
+    }
+    const std::string drive = local.substr(0, 3);
+    for (const std::string& root : {drive, R"(\\?\)" + drive}) {
+        EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&root] { file_source source(root); })) << root;
+    }
+    const std::string share = R"(\\localhost\)" + std::string(1, local[0]) + R"($\)";
+    std::error_code error;
+    if (std::filesystem::exists(openxisf::test::path_of(share), error)) {
+        for (const std::string& root : {share, R"(\\?\UNC\localhost\)" + std::string(1, local[0]) + R"($\)"}) {
+            EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&root] { file_source source(root); })) << root;
+        }
+    }
+}
+#endif
+
 TEST(file_source, refuses_empty_and_invalid_utf8_paths)
 {
     EXPECT_TRUE(throws<usage_error>(errc::invalid_argument, [] { file_source source(""); }));
@@ -306,6 +354,24 @@ TEST(file_io, relative_paths_longer_than_260_characters)
     EXPECT_EQ(text(read_all(source)), "content");
 }
 
+#if !defined(_WIN32)
+TEST(file_io, relative_paths_from_a_current_directory_longer_than_256_bytes)
+{
+    // getcwd() gives the current directory only in a buffer that holds it, which grows from 256 bytes; Windows makes no
+    // such directory current without a manifest for long paths.
+    const temp_directory directory;
+    const std::filesystem::path folder =
+        directory.path() / std::string(100, 'd') / std::string(100, 'e') / std::string(100, 'g');
+    std::filesystem::create_directories(folder);
+    ASSERT_GT(utf8(folder).size(), 300U);
+    const working_directory moved(folder);
+
+    write_through_sink("unit.xisf", "content");
+
+    EXPECT_EQ(read_file(folder / "unit.xisf"), "content");
+}
+#endif
+
 #if defined(_WIN32)
 TEST(file_io, network_paths)
 {
@@ -402,11 +468,12 @@ TEST(file_sink, a_write_that_fails_part_of_the_way_leaves_the_target_as_it_was)
 
 TEST(file_sink, a_finish_that_fails_removes_the_temporary_file)
 {
+    // A directory takes the place of the target once the sink is made, and no rename replaces it.
     const temp_directory directory;
-    std::filesystem::create_directory(directory.path() / "target");
-    write_file(directory.path() / "target" / "inside.txt", bytes("kept"));
     file_sink sink(directory.file("target"));
     sink.write(bytes("content"));
+    std::filesystem::create_directory(directory.path() / "target");
+    write_file(directory.path() / "target" / "inside.txt", bytes("kept"));
 
     EXPECT_TRUE(throws<io_error>(errc::write_failed, [&] { sink.finish(); }));
     EXPECT_EQ(entries(directory.path()), std::vector<std::string>{"target"});
@@ -503,6 +570,89 @@ TEST(file_sink, two_sinks_of_one_target_replace_it_in_turn)
     second.finish();
     EXPECT_EQ(read_file(directory.path() / "unit.xisf"), "second");
     EXPECT_EQ(entries(directory.path()), std::vector<std::string>{"unit.xisf"});
+}
+
+// A file_sink writes into a temporary file of a random name, which is created only where nothing exists, so that a
+// file of that name is not truncated, nor a link followed; the sink tries another name then.
+TEST(native_file, creates_a_file_only_where_nothing_exists)
+{
+    using openxisf::detail::native_file;
+    const temp_directory directory;
+    write_file(directory.path() / "taken", bytes("old content"));
+    EXPECT_FALSE(native_file::create_new(directory.file("taken"), "unit.xisf").has_value());
+    EXPECT_EQ(read_file(directory.path() / "taken"), "old content");
+
+    // A link to a file, and a link to nothing, through which a file would be created.
+    if (openxisf::test::create_symbolic_link(directory.path() / "taken", directory.path() / "link")) {
+        EXPECT_FALSE(native_file::create_new(directory.file("link"), "unit.xisf").has_value());
+        EXPECT_EQ(read_file(directory.path() / "taken"), "old content");
+        ASSERT_TRUE(openxisf::test::create_symbolic_link(directory.path() / "missing", directory.path() / "dangling"));
+        EXPECT_FALSE(native_file::create_new(directory.file("dangling"), "unit.xisf").has_value());
+        EXPECT_FALSE(std::filesystem::exists(directory.path() / "missing"));
+    }
+
+    std::optional<native_file> created = native_file::create_new(directory.file("new"), "unit.xisf");
+    if (created) {
+        created->discard(directory.file("new"));
+    } else {
+        ADD_FAILURE() << "no file was created where nothing exists";
+    }
+}
+
+TEST(file_sink, refuses_a_directory_before_it_creates_a_file)
+{
+    // No rename replaces a directory, which finish() found only once the whole unit was written.
+    const temp_directory directory;
+    std::filesystem::create_directory(directory.path() / "target");
+    write_file(directory.path() / "target" / "inside.txt", bytes("kept"));
+
+    for (const std::string& target : {directory.file("target"), directory.file("target") + "/"}) {
+        EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&target] { file_sink sink(target); })) << target;
+    }
+    EXPECT_EQ(entries(directory.path()), std::vector<std::string>{"target"});
+    EXPECT_EQ(entries(directory.path() / "target"), std::vector<std::string>{"inside.txt"});
+}
+
+TEST(file_sink, refuses_a_device_and_a_fifo)
+{
+    const temp_directory directory;
+#if defined(_WIN32)
+    // Windows makes a device name, in any directory, a path of its device namespace (\\.\NUL), where no temporary file
+    // can be created.
+    for (const std::string& device : {std::string("NUL"), directory.file("NUL")}) {
+        EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&device] { file_sink sink(device); })) << device;
+    }
+    EXPECT_EQ(directory.entries(), 0U);
+#else
+    // A rename replaces them: a FIFO named like the unit, and the node of a device, which root can replace.
+    const std::string fifo = directory.file("unit.xisf");
+    ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+    EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&fifo] { file_sink sink(fifo); }));
+    EXPECT_TRUE(std::filesystem::is_fifo(std::filesystem::symlink_status(directory.path() / "unit.xisf")));
+    EXPECT_EQ(entries(directory.path()), std::vector<std::string>{"unit.xisf"});
+
+    EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [] { file_sink sink("/dev/null"); }));
+    EXPECT_TRUE(std::filesystem::is_character_file(std::filesystem::symlink_status("/dev/null")));
+#endif
+}
+
+TEST(file_sink, replaces_a_link_to_a_directory_itself)
+{
+    // The target is looked at without following a link, which the new file replaces, as it replaces a link to a file.
+    const temp_directory directory;
+    std::filesystem::create_directory(directory.path() / "real");
+#if defined(_WIN32)
+    // Windows lets any user create a junction, and a symbolic link only with a privilege.
+    openxisf::test::create_junction(directory.path() / "real", directory.path() / "link");
+#else
+    ASSERT_TRUE(openxisf::test::create_symbolic_link(directory.path() / "real", directory.path() / "link"));
+#endif
+
+    write_through_sink(directory.file("link"), "new content");
+
+    EXPECT_EQ(read_file(directory.path() / "link"), "new content");
+    EXPECT_EQ(entries(directory.path()), (std::vector<std::string>{"link", "real"}));
+    EXPECT_TRUE(entries(directory.path() / "real").empty());
 }
 
 TEST(file_sink, a_missing_directory_is_open_failed)

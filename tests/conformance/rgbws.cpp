@@ -144,6 +144,19 @@ TEST(conformance_rgbws, luminance_coefficients_that_the_chromaticities_do_not_gi
     EXPECT_TRUE(no_diagnostics(rounded.diagnostics()));
 }
 
+TEST(conformance_rgbws, chromaticities_that_give_luminance_coefficients_outside_the_unit_range_are_kept_with_a_warning)
+{
+    // Spec §8.5.4.1: a white just outside the triangle of the primaries gives a coefficient below 0, which the writer
+    // refuses to write, though the coefficients given agree with it within the tolerance.
+    const reader file =
+        open_space(R"(gamma="2.2" x="0.64:0.30:0.0" y="0.33:0.60:0.39198" Y="0.4972:0:0.5029")", {.strict = true});
+    ASSERT_TRUE(single_diagnostic(file.diagnostics(), severity::warning, errc::invalid_rgb_working_space,
+                                  "/xisf/Image[1]/RGBWorkingSpace[1]"));
+    EXPECT_EQ(file.diagnostics()[0].context.attribute, "Y");
+    EXPECT_EQ(openxisf::test::value_of(file.image(0).rgb_working_space).luminance,
+              (std::array<double, 3>{0.4972, 0.0, 0.5029}));
+}
+
 TEST(conformance_rgbws, strict_reading_refuses_an_invalid_working_space)
 {
     EXPECT_TRUE(openxisf::test::throws<openxisf::invalid_data_error>(errc::invalid_rgb_working_space,

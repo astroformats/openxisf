@@ -81,6 +81,17 @@ TEST(property_value, other_integer_types_map_by_width_and_signedness)
     EXPECT_EQ(property_value(static_cast<unsigned short>(3)).get<std::uint16_t>(), 3U);
 }
 
+TEST(property_value, character_types_are_promoted_to_32_bit_integers)
+{
+    // The behaviour of 1.0, pinned: the constructor of other integer types leaves the character types out, and the
+    // promotions of C++ give them the constructors of the 32-bit integers, so that a character becomes its code.
+    EXPECT_EQ(property_value('R'), property_value(std::int32_t{82}));
+    EXPECT_EQ(property_value(u8'x').type(), property_type::int32);
+    EXPECT_EQ(property_value(u'x').type(), property_type::int32);
+    EXPECT_EQ(property_value(L'x').type(), property_type::int32);
+    EXPECT_EQ(property_value(U'x'), property_value(std::uint32_t{0x78}));
+}
+
 TEST(property_value, text_makes_a_string_value)
 {
     const std::string text = "  Ñandú  ";
@@ -294,6 +305,16 @@ TEST(property_list, set_appends_or_replaces_in_place)
     EXPECT_EQ(list.begin()->id, "A");
     EXPECT_EQ(list.begin()->value.get<std::string>(), "replaced");
     EXPECT_EQ(std::next(list.begin())->id, "B");
+}
+
+TEST(property_list, set_with_a_value_drops_the_format_and_the_comment_that_it_replaces)
+{
+    // The behaviour of 1.0, pinned (property.h): set(id, value) puts a property without format and comment in place of
+    // the one of that identifier, whose format and comment are gone.
+    property_list list;
+    list.set(property{.id = "A", .value = 1, .format = openxisf::property_format{.width = 5}, .comment = "the first"});
+    list.set("A", 2);
+    EXPECT_EQ(list.at("A"), (property{.id = "A", .value = 2}));
 }
 
 TEST(property_list, finds_properties_by_identifier)

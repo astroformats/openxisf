@@ -25,6 +25,11 @@ else()
     if(OPENXISF_HARDENING)
         openxisf_enable_hardening(openxisf_fuzz_replay)
     endif()
+    # Windows: the paths come from CommandLineToArgvW() of shell32, and windows.h comes without the min and max macros.
+    if(WIN32)
+        target_compile_definitions(openxisf_fuzz_replay PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(openxisf_fuzz_replay PUBLIC shell32)
+    endif()
 endif()
 
 # MIN_COVERAGE is the number of edges below which a libFuzzer run counts as broken. It is set well below what the seeds
@@ -36,9 +41,7 @@ function(openxisf_add_fuzz_target name)
 
     add_executable(${name} ${arg_SOURCES})
     target_link_libraries(${name} PRIVATE openxisf_internal)
-    set_target_properties(${name} PROPERTIES
-        CXX_EXTENSIONS OFF
-        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+    set_target_properties(${name} PROPERTIES CXX_EXTENSIONS OFF)
     openxisf_enable_warnings(${name})
     openxisf_enable_sanitizers(${name})
     if(OPENXISF_HARDENING)
@@ -62,6 +65,10 @@ function(openxisf_add_fuzz_target name)
                 -D "SECONDS=${OPENXISF_FUZZ_SECONDS}"
                 -D "MIN_COVERAGE=${arg_MIN_COVERAGE}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/run_fuzzer.cmake")
+        # The time of the run and ten minutes more, for loading the corpus and the last input, instead of the timeout
+        # of the test presets.
+        math(EXPR timeout "${OPENXISF_FUZZ_SECONDS} + 600")
+        set_tests_properties(fuzz.${short_name} PROPERTIES TIMEOUT ${timeout})
     else()
         target_link_libraries(${name} PRIVATE openxisf_fuzz_replay)
         add_test(NAME fuzz.${short_name} COMMAND ${name} "${seeds}")
@@ -77,3 +84,14 @@ openxisf_add_fuzz_target(fuzz_property_text SOURCES property_text.cpp MIN_COVERA
 openxisf_add_fuzz_target(fuzz_roundtrip SOURCES roundtrip.cpp MIN_COVERAGE 500)
 openxisf_add_fuzz_target(fuzz_xisb_index SOURCES xisb_index.cpp MIN_COVERAGE 300)
 openxisf_add_fuzz_target(fuzz_astrometry SOURCES astrometry.cpp MIN_COVERAGE 300)
+
+# The replay driver finds seeds under a path that no ANSI code page of Windows holds.
+if(mode STREQUAL "replay")
+    add_test(NAME fuzz.replay_path
+        COMMAND "${CMAKE_COMMAND}"
+            -D "TARGET=$<TARGET_FILE:fuzz_text_grammar>"
+            -D "SEEDS=${CMAKE_CURRENT_SOURCE_DIR}/seeds/text_grammar"
+            -D "DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/seeds Ñandú Ωμέγα 種子"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/replay_path.cmake")
+    set_tests_properties(fuzz.replay_path PROPERTIES LABELS fuzz)
+endif()

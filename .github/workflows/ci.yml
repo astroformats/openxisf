@@ -111,8 +111,26 @@ jobs:
         run: |
           project=$(sed -n 's/^    VERSION \([0-9][0-9.]*\)$/\1/p' CMakeLists.txt)
           port=$(jq -r .version packaging/vcpkg/vcpkg.json)
-          echo "CMakeLists.txt: $project, vcpkg port: $port"
-          test -n "$project" && test "$project" = "$port"
+          status=$(sed -n 's/^\*\*Status: \([0-9][0-9.]*\)\.\*\*.*$/\1/p' README.md)
+          echo "CMakeLists.txt: $project, vcpkg port: $port, README status: $status"
+          test -n "$project" && test "$project" = "$port" && test "$project" = "$status"
+
+      # cl reads a header without a byte order mark in the code page of the system, unless the application compiles
+      # with /utf-8, and warns (C4819) about a character that the code page lacks, as 932 and 950 lack the signs of
+      # multiplication and of plus or minus: the installed headers keep to ASCII and the section sign, which they have.
+      - name: Installed headers in ASCII
+        run: |
+          git ls-files -z include 'cmake/*.h.in' | python3 -c '
+          import sys
+          found = False
+          for name in filter(None, sys.stdin.read().split("\0")):
+              with open(name, encoding="utf-8") as header:
+                  for number, line in enumerate(header, 1):
+                      if any(ord(c) > 127 and c != "§" for c in line):
+                          print(f"::error file={name},line={number}::A character other than ASCII and the section sign")
+                          found = True
+          sys.exit(found)
+          '
 
       - name: Formatting
         run: |
@@ -323,8 +341,9 @@ jobs:
       - name: Build
         run: cmake --build --preset linux-clang-fuzz
 
+      # The eight targets at once, so that the step takes the time of one on any number of processors.
       - name: Fuzz
-        run: ctest --preset linux-clang-fuzz --parallel "$(nproc)"
+        run: ctest --preset linux-clang-fuzz --parallel 8
 
       # ctest keeps the output of the tests that passed in its log, where each run states the edges it covered.
       - name: Coverage

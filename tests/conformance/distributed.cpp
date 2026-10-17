@@ -20,6 +20,7 @@
 #include "model/unit.h"
 #include "support/bytes.h"
 #include "support/diagnostics.h"
+#include "support/faulty_io.h"
 #include "support/files.h"
 #include "support/fixture_builder.h"
 #include "support/opened_unit.h"
@@ -40,7 +41,6 @@
 #include <map>
 #include <memory>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -256,10 +256,10 @@ TEST(conformance_distributed, the_io_and_unsupported_errors_of_a_resolver_make_b
 TEST(conformance_distributed, other_exceptions_of_a_resolver_pass_through)
 {
     const read_options options{.resolver = [](const external_reference&) -> std::unique_ptr<openxisf::input_source> {
-        throw std::runtime_error("the application's own failure");
+        throw openxisf::test::injected_fault();
     }};
     EXPECT_THROW((void)openxisf::test::open_unit(bytes(header_xml(row_image(3, "path(@header_dir/a.xisb)"))), options),
-                 std::runtime_error);
+                 openxisf::test::injected_fault);
 }
 
 TEST(conformance_distributed, a_unit_opened_from_a_source_has_no_resolver_by_default)
@@ -333,6 +333,63 @@ TEST(conformance_distributed, the_errors_of_a_resolver_keep_their_class_and_syst
     EXPECT_TRUE(
         throws<openxisf::unsupported_error>(errc::invalid_location, [&refused] { (void)refused.read_pixels(0); }));
     EXPECT_TRUE(throws<openxisf::unsupported_error>(errc::invalid_location, [&] { (void)open(refusing, true); }));
+}
+
+TEST(conformance_distributed, an_io_error_of_a_file_while_ancillary_data_load_makes_their_blocks_unavailable)
+{
+    // The index of the data blocks file is read, then every read of a block fails: the pixels of a thumbnail, an ICC
+    // profile and the value of a property, which are loaded with the unit, are unavailable, each with an error of the
+    // code of the source, as when the index cannot be read. A strict open throws the io_error, with its system error,
+    // and so does a load of the ancillary data that a header-only open left. An io_error of the unit's own source
+    // fails the open (reader.a_failure_of_the_source_while_loading_the_ancillary_data_leaves_the_reader_unchanged).
+    const std::error_code denied = std::make_error_code(std::errc::permission_denied);
+    const auto blocks = std::make_shared<const std::vector<std::byte>>(
+        blocks_file_of({bytes("1234"), bytes("abcd"), bytes("efgh"), bytes("ijkl")}, {1, 2, 3, 4}));
+    // The four blocks of 4 bytes end the file.
+    const std::uint64_t first_block = blocks->size() - 16;
+    const openxisf::external_resolver resolver = [blocks, first_block, denied](const external_reference&) {
+        return std::make_unique<openxisf::callback_source>(
+            blocks->size(), [blocks, first_block, denied](std::uint64_t offset, std::span<std::byte> destination) {
+                if (offset >= first_block) {
+                    throw openxisf::io_error(errc::read_failed, "the network went away", denied);
+                }
+                std::ranges::copy(std::span(*blocks).subspan(offset, destination.size()), destination.begin());
+            });
+    };
+    const std::string header = header_xml(
+        R"(<Image geometry="4:1:1" sampleFormat="UInt8" colorSpace="Gray" location="path(@header_dir/a.xisb):1">)"
+        R"(<Thumbnail geometry="2:2:1" sampleFormat="UInt8" colorSpace="Gray" location="path(@header_dir/a.xisb):2"/>)"
+        R"(<ICCProfile location="path(@header_dir/a.xisb):3"/></Image>)" +
+        bytes_property("Test:Bytes", 4, "path(@header_dir/a.xisb):4"));
+    const auto open = [&](bool strict, bool header_only) {
+        return openxisf::test::open_unit(bytes(header),
+                                         {.strict = strict, .header_only = header_only, .resolver = resolver});
+    };
+    const auto expect_unavailable = [](const reader& file) {
+        std::vector<std::string> paths;
+        for (const openxisf::diagnostic& entry : file.diagnostics()) {
+            EXPECT_EQ(entry.severity, severity::error) << entry.context.element;
+            EXPECT_EQ(entry.code, errc::read_failed) << entry.context.element;
+            paths.push_back(entry.context.element);
+        }
+        std::ranges::sort(paths);
+        EXPECT_EQ(paths, (std::vector<std::string>{"/xisf/Image[1]/ICCProfile[1]", "/xisf/Image[1]/Thumbnail[1]",
+                                                   "/xisf/Property[1]"}));
+        EXPECT_FALSE(file.image(0).thumbnail.has_value());
+        EXPECT_TRUE(file.image(0).icc_profile.empty());
+        EXPECT_EQ(file.properties().find("Test:Bytes"), nullptr);
+    };
+
+    expect_unavailable(open(false, false));
+    reader deferred = open(false, true);
+    EXPECT_TRUE(no_diagnostics(deferred.diagnostics()));
+    deferred.load_ancillary_data();
+    expect_unavailable(deferred);
+
+    EXPECT_TRUE(throws_io_error(errc::read_failed, denied, [&] { (void)open(true, false); }));
+    reader strict = open(true, true);
+    EXPECT_TRUE(throws_io_error(errc::read_failed, denied, [&strict] { strict.load_ancillary_data(); }));
+    EXPECT_FALSE(strict.ancillary_data_loaded());
 }
 
 TEST(conformance_distributed, the_number_of_external_files_is_limited)
@@ -836,7 +893,9 @@ TEST(conformance_distributed, the_path_of_a_data_blocks_file_is_relative_and_end
         openxisf::memory_sink header_file;
         openxisf::memory_sink blocks_file;
         output.save_distributed(header_file, blocks_file, path);
-        const std::vector<std::string> locations = locations_of(header_file.data());
+        const openxisf::test::distributed_unit unit{.header = header_file.release(), .blocks = blocks_file.release()};
+        openxisf::test::record_distributed_unit(unit, path);
+        const std::vector<std::string> locations = locations_of(unit.header);
         ASSERT_EQ(locations.size(), 2U);
         EXPECT_TRUE(locations[0].starts_with("path(@header_dir/" + std::string(path) + "):0x")) << locations[0];
     }
@@ -854,6 +913,10 @@ TEST(conformance_distributed, a_writer_saves_a_header_file_and_its_data_blocks_f
     EXPECT_TRUE(std::filesystem::exists(openxisf::test::path_of(directory.file(name + ".xisb"))));
     const std::string header = openxisf::test::read_file(openxisf::test::path_of(directory.file(name + ".xish")));
     EXPECT_NE(header.find("path(@header_dir/" + name + ".xisb):0x"), std::string::npos);
+    openxisf::test::record_distributed_unit(
+        {.header = bytes(header),
+         .blocks = bytes(openxisf::test::read_file(openxisf::test::path_of(directory.file(name + ".xisb"))))},
+        name + ".xisb");
 
     // Saved again, both files are replaced, and their blocks found.
     output.save_distributed(directory.file(name + ".xish"));

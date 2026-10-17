@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -193,6 +194,17 @@ TEST(conformance_property_element, strings_in_character_data_keep_all_their_whit
               "a & <b> \xF4\x8F\xBF\xBF");
     EXPECT_EQ(value_of(R"(<Property id="S" type="String">x<![CDATA[ <y> ]]>z</Property>)").get<std::string>(),
               "x <y> z");
+    // Beside a comment, a processing instruction or a CDATA section too, as XML gives them.
+    EXPECT_EQ(value_of(R"(<Property id="S" type="String"> <!-- c -->a</Property>)").get<std::string>(), " a");
+    EXPECT_EQ(value_of(R"(<Property id="S" type="String">a<?pi x?> </Property>)").get<std::string>(), "a ");
+    EXPECT_EQ(value_of(R"(<Property id="S" type="String">  <![CDATA[x]]></Property>)").get<std::string>(), "  x");
+    // In the metadata, an image and a thumbnail, whose elements are not the first of the header.
+    const unit nested = open_body(openxisf::test::image_xml(
+        {}, R"(<Property id="S" type="String"> <!---->a </Property>)" +
+                openxisf::test::thumbnail_xml({}, R"(<Property id="S" type="String"> <!---->b </Property>)")));
+    EXPECT_TRUE(no_diagnostics(nested.diagnostics));
+    EXPECT_EQ(properties_of(nested, "/xisf/Image[1]").at("S").value, property_value(" a "));
+    EXPECT_EQ(properties_of(nested, "/xisf/Image[1]/Thumbnail[1]").at("S").value, property_value(" b "));
 }
 
 TEST(conformance_property_element, strings_in_data_blocks)
@@ -219,6 +231,21 @@ TEST(conformance_property_element, strings_in_data_blocks)
     EXPECT_EQ(standalone(opened, "Embedded").value.get<std::string>(), "The quick brown fox");
     EXPECT_EQ(standalone(opened, "Attached").value.get<std::string>(), "The quick brown fox");
     EXPECT_EQ(standalone(opened, "Compressed").value.get<std::string>(), foxes);
+}
+
+TEST(conformance_property_element, a_string_in_a_data_block_ignores_the_character_data_of_its_element)
+{
+    // The character data of an element with an inline block are the block; beside another block they are ignored,
+    // with a warning, unless they are white space.
+    const unit opened = open_with_blocks(
+        R"(<Property id="S" type="String" location="attachment:{0}">ignored</Property>)", {bytes("kept")});
+    EXPECT_TRUE(single_diagnostic(opened.diagnostics, severity::warning, errc::invalid_property, "/xisf/Property[1]"));
+    EXPECT_EQ(opened.properties.standalone.at("S").value.get<std::string>(), "kept");
+    const unit spaced = open_with_blocks(R"(<Property id="S" type="String" location="attachment:{0}">)"
+                                         "\n\t </Property>",
+                                         {bytes("kept")});
+    EXPECT_TRUE(no_diagnostics(spaced.diagnostics));
+    EXPECT_EQ(standalone(spaced, "S").value.get<std::string>(), "kept");
 }
 
 TEST(conformance_property_element, a_string_in_a_data_block_must_be_utf8_without_nul)
@@ -472,11 +499,11 @@ TEST(conformance_property_element, an_identifier_outside_the_grammar_is_tolerate
 TEST(conformance_property_element, identifiers_are_unique_per_object)
 {
     // Spec §8.4.1: the first property keeps the identifier, the second is unavailable.
-    const unit opened =
-        open_body(R"(<Property id="P" type="Int32" value="1"/><Property id="P" type="Int32" value="2"/>)");
-    EXPECT_TRUE(
-        single_diagnostic(opened.diagnostics, severity::error, errc::duplicate_property_id, "/xisf/Property[2]"));
-    EXPECT_EQ(opened.properties.standalone.at("P").value, property_value(1));
+    const unit opened = open_body(openxisf::test::image_xml(
+        {}, R"(<Property id="P" type="Int32" value="1"/><Property id="P" type="Int32" value="2"/>)"));
+    EXPECT_TRUE(single_diagnostic(opened.diagnostics, severity::error, errc::duplicate_property_id,
+                                  "/xisf/Image[1]/Property[2]"));
+    EXPECT_EQ(properties_of(opened, "/xisf/Image[1]").at("P").value, property_value(1));
     // Different objects may have properties with the same identifier, and so may an object and the unit.
     const unit separate = open_body(openxisf::test::image_xml({}, R"(<Property id="P" type="Int32" value="1"/>)") +
                                     openxisf::test::image_xml({}, R"(<Property id="P" type="Int32" value="2"/>)") +
@@ -493,6 +520,110 @@ TEST(conformance_property_element, identifiers_are_unique_per_object)
                                   "/xisf/Image[1]/Reference[1]"));
     EXPECT_EQ(referenced.diagnostics.front().context.attribute, "ref");
     EXPECT_EQ(properties_of(referenced, "/xisf/Image[1]").at("P").value, property_value(1));
+}
+
+TEST(conformance_property_element, standalone_properties_of_one_identifier_are_tolerated)
+{
+    // Spec §8.4: standalone properties are associated with no object, so their identifiers need not be unique. The
+    // reader returns one of each identifier, the first, with a warning, and each image gets the property that its
+    // Reference names.
+    const std::string body = R"(<Property uid="red" id="Instrument:Filter:Name" type="String">R</Property>)"
+                             R"(<Property uid="green" id="Instrument:Filter:Name" type="String">G</Property>)" +
+                             openxisf::test::image_xml({}, R"(<Reference ref="red"/>)") +
+                             openxisf::test::image_xml({}, R"(<Reference ref="green"/>)");
+    const unit opened = open_body(body, {.strict = true});
+    EXPECT_TRUE(
+        single_diagnostic(opened.diagnostics, severity::warning, errc::duplicate_property_id, "/xisf/Property[2]"));
+    EXPECT_EQ(opened.diagnostics.front().context.attribute, "id");
+    ASSERT_EQ(opened.properties.standalone.size(), 1U);
+    EXPECT_EQ(opened.properties.standalone.at("Instrument:Filter:Name").value, property_value("R"));
+    EXPECT_EQ(properties_of(opened, "/xisf/Image[1]").at("Instrument:Filter:Name").value, property_value("R"));
+    EXPECT_EQ(properties_of(opened, "/xisf/Image[2]").at("Instrument:Filter:Name").value, property_value("G"));
+}
+
+TEST(conformance_property_element, a_property_associated_twice_with_one_object_is_the_same_property)
+{
+    // Contained and named, named and contained, or named twice: the object has the property once, and the Reference
+    // that associates it again is a warning that says so.
+    struct association
+    {
+        std::string body{};
+        std::string reference{};
+    };
+    const std::string property = R"(<Property uid="p" id="A" type="Int32" value="1"/>)";
+    for (const association& entry : {
+             association{.body = openxisf::test::image_xml({}, property + R"(<Reference ref="p"/>)"),
+                         .reference = "/xisf/Image[1]/Reference[1]"},
+             association{.body = openxisf::test::image_xml({}, R"(<Reference ref="p"/>)" + property),
+                         .reference = "/xisf/Image[1]/Reference[1]"},
+             association{.body =
+                             property + openxisf::test::image_xml({}, R"(<Reference ref="p"/><Reference ref="p"/>)"),
+                         .reference = "/xisf/Image[1]/Reference[2]"},
+         }) {
+        const unit opened = open_body(entry.body, {.strict = true});
+        ASSERT_TRUE(single_diagnostic(opened.diagnostics, severity::warning, errc::invalid_reference, entry.reference))
+            << entry.body;
+        EXPECT_EQ(opened.diagnostics.front().context.attribute, "ref");
+        EXPECT_NE(opened.diagnostics.front().message.find("same property"), std::string::npos)
+            << opened.diagnostics.front().message;
+        const property_list& image = properties_of(opened, "/xisf/Image[1]");
+        ASSERT_EQ(image.size(), 1U) << entry.body;
+        EXPECT_EQ(image.at("A").value, property_value(1));
+    }
+    // The metadata, too.
+    const unit metadata = open_body(property + R"(<Metadata><Reference ref="p"/><Reference ref="p"/></Metadata>)");
+    EXPECT_EQ(std::ranges::count(metadata.diagnostics, errc::invalid_reference, &openxisf::diagnostic::code), 1)
+        << openxisf::test::describe(metadata.diagnostics);
+}
+
+TEST(conformance_property_element, values_of_the_image_namespace_that_the_specification_forbids_are_tolerated)
+{
+    // Spec §11.5.3.5: a frame number from one, group and subgroup identifiers of [_a-zA-Z0-9][_a-zA-Z0-9-.]*, and a
+    // subgroup only with a group. Other values are kept, with a warning.
+    const unit valid =
+        open_body(openxisf::test::image_xml({}, R"(<Property id="Image:FrameNumber" type="UInt32" value="1"/>)"
+                                                R"(<Property id="Image:GroupId" type="String">M42_2026-10.L</Property>)"
+                                                R"(<Property id="Image:SubgroupId" type="String">9</Property>)"));
+    EXPECT_TRUE(no_diagnostics(valid.diagnostics));
+    struct problem
+    {
+        std::string content{};
+        std::string element{};
+        std::string_view attribute{};
+    };
+    const std::string group = R"(<Property id="Image:GroupId" type="String">L</Property>)";
+    for (const problem& entry : {
+             problem{.content = R"(<Property id="Image:FrameNumber" type="UInt32" value="0"/>)",
+                     .element = "/xisf/Image[1]/Property[1]",
+                     .attribute = "value"},
+             problem{.content = R"(<Property id="Image:GroupId" type="String">M42 L</Property>)",
+                     .element = "/xisf/Image[1]/Property[1]",
+                     .attribute = "value"},
+             problem{.content = R"(<Property id="Image:GroupId" type="String">.L</Property>)",
+                     .element = "/xisf/Image[1]/Property[1]",
+                     .attribute = "value"},
+             problem{.content = R"(<Property id="Image:GroupId" type="String"></Property>)",
+                     .element = "/xisf/Image[1]/Property[1]",
+                     .attribute = "value"},
+             problem{.content = group + R"(<Property id="Image:SubgroupId" type="String">a/b</Property>)",
+                     .element = "/xisf/Image[1]/Property[2]",
+                     .attribute = "value"},
+             problem{.content = R"(<Property id="Image:SubgroupId" type="String">flat</Property>)",
+                     .element = "/xisf/Image[1]/Property[1]",
+                     .attribute = "id"},
+             problem{.content = openxisf::test::thumbnail_xml(
+                         {}, R"(<Property id="Image:FrameNumber" type="UInt32" value="0"/>)"),
+                     .element = "/xisf/Image[1]/Thumbnail[1]/Property[1]",
+                     .attribute = "value"},
+         }) {
+        const unit opened = open_body(openxisf::test::image_xml({}, entry.content), {.strict = true});
+        ASSERT_TRUE(single_diagnostic(opened.diagnostics, severity::warning, errc::invalid_property, entry.element))
+            << entry.content;
+        EXPECT_EQ(opened.diagnostics.front().context.attribute, entry.attribute) << entry.content;
+    }
+    const unit kept =
+        open_body(openxisf::test::image_xml({}, R"(<Property id="Image:FrameNumber" type="UInt32" value="0"/>)"));
+    EXPECT_EQ(properties_of(kept, "/xisf/Image[1]").at("Image:FrameNumber").value, property_value(std::uint32_t{0}));
 }
 
 TEST(conformance_property_element, a_reserved_identifier_with_another_type_is_tolerated)
@@ -657,19 +788,20 @@ TEST(conformance_property_element, a_property_with_an_unavailable_block_is_unava
 
 TEST(conformance_property_element, a_property_whose_block_does_not_decompress_is_unavailable)
 {
-    // Equal sizes would mean a block stored as it is.
-    const unit opened = open_with_blocks(
-        R"(<Property id="P" type="ByteArray" length="4" location="attachment:{0}" compression="zlib:4"/>)",
-        {bytes("abc")});
-    EXPECT_TRUE(
-        single_diagnostic(opened.diagnostics, severity::error, errc::corrupt_compressed_data, "/xisf/Property[1]"));
-    EXPECT_EQ(opened.diagnostics.front().context.offset, 4096U);
-    EXPECT_TRUE(opened.properties.standalone.empty());
-    EXPECT_TRUE(throws<openxisf::integrity_error>(errc::corrupt_compressed_data, [] {
-        (void)open_with_blocks(R"(<Property id="P" type="ByteArray" length="4" location="attachment:{0}" )"
-                               R"(compression="zlib:4"/>)",
-                               {bytes("abc")}, {.strict = true});
-    }));
+    // Equal sizes would mean a block stored as it is. A vector and a String, whose blocks are read apart.
+    for (const std::string_view type : {R"(type="ByteArray" length="4")", R"(type="String")"}) {
+        const std::string body =
+            R"(<Property id="P" )" + std::string(type) + R"( location="attachment:{0}" compression="zlib:4"/>)";
+        const unit opened = open_with_blocks(body, {bytes("abc")});
+        EXPECT_TRUE(
+            single_diagnostic(opened.diagnostics, severity::error, errc::corrupt_compressed_data, "/xisf/Property[1]"))
+            << type;
+        EXPECT_EQ(opened.diagnostics.front().context.offset, 4096U) << type;
+        EXPECT_TRUE(opened.properties.standalone.empty()) << type;
+        EXPECT_TRUE(throws<openxisf::integrity_error>(errc::corrupt_compressed_data, [&body] {
+            (void)open_with_blocks(body, {bytes("abc")}, {.strict = true});
+        })) << type;
+    }
 }
 
 TEST(conformance_property_element, the_data_loaded_at_open_is_limited)

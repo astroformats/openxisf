@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include "core/scratch_buffer.h"
+
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -13,6 +16,10 @@
 // returns part of a subblock. An encoder appends to its output. Out of memory is std::bad_alloc; a library that fails
 // for any other reason than the data, such as a version mismatch, throws unsupported_error with errc::codec_failure.
 // Messages have no context; the caller adds it.
+//
+// The encoder classes keep the state of their library from one input to the next, reset for each, so that a thread
+// that compresses many subblocks does not allocate and initialize a state for each; an input gives the bytes that a new
+// state gives it. The compress functions make a new state for their input.
 
 namespace openxisf::detail {
 
@@ -39,6 +46,25 @@ void zlib_decompress(std::span<const std::byte> input, std::span<std::byte> outp
 void zlib_compress(std::span<const std::byte> input, int level, std::vector<std::byte>& output,
                    std::size_t max_piece = zlib_max_piece);
 
+/// Compresses inputs one after another into zlib streams, as zlib_compress() does, with one deflate state, which
+/// deflateReset() makes that of a new stream for each.
+class zlib_encoder
+{
+public:
+    explicit zlib_encoder(int level, std::size_t max_piece = zlib_max_piece);
+    zlib_encoder(const zlib_encoder&) = delete;
+    zlib_encoder& operator=(const zlib_encoder&) = delete;
+    ~zlib_encoder();
+
+    void compress(std::span<const std::byte> input, std::vector<std::byte>& output);
+
+private:
+    // The z_stream, at an address that does not change, which zlib requires.
+    struct state;
+    std::unique_ptr<state> state_;
+    std::size_t max_piece_;
+};
+
 /// Decompresses an LZ4 block (the block format, without a frame), as written by LZ4 and LZ4HC. Both sizes are at most
 /// lz4_max_decoded_size.
 void lz4_decompress(std::span<const std::byte> input, std::span<std::byte> output);
@@ -49,11 +75,31 @@ void lz4_compress(std::span<const std::byte> input, std::vector<std::byte>& outp
 /// Compresses input, at most lz4_max_input_size bytes, into an LZ4 block with LZ4HC at a level from 1 to 12.
 void lz4hc_compress(std::span<const std::byte> input, int level, std::vector<std::byte>& output);
 
+/// Compresses inputs one after another into LZ4 blocks, as lz4hc_compress() does, with one LZ4HC stream of about
+/// 256 KiB, allocated here, so that a failure is std::bad_alloc, and prepared with LZ4_resetStreamHC_fast() for each
+/// input, which unlike a new state is not cleared.
+class lz4hc_encoder
+{
+public:
+    explicit lz4hc_encoder(int level);
+
+    void compress(std::span<const std::byte> input, std::vector<std::byte>& output);
+
+private:
+    scratch_buffer stream_;
+    int level_;
+};
+
 /// Decompresses a single Zstandard frame (RFC 8878). A frame that does not declare its content size is decoded through
 /// a window buffer, whose size is limited to the largest power of two not above max_window (at least 1 KiB; 0 means
 /// the largest that Zstandard supports); a larger window is a limit_error with errc::zstd_window_too_large. A frame
 /// that declares its content size is decoded straight into output and needs no window buffer.
 void zstd_decompress(std::span<const std::byte> input, std::span<std::byte> output, std::uint64_t max_window);
+
+/// Checks what zstd_decompress() checks before it decodes: that input is exactly one Zstandard frame, which declares a
+/// content size of expected bytes or none, so that a block can be checked before the memory of its data is allocated.
+/// Throws integrity_error with errc::corrupt_compressed_data.
+void zstd_check_frame(std::span<const std::byte> input, std::uint64_t expected);
 
 /// True when input starts with the header of a Zstandard frame that does not declare its content size, which
 /// zstd_decompress() decodes through a window buffer. False for any other input, which it decodes in place or refuses.
@@ -61,5 +107,22 @@ void zstd_decompress(std::span<const std::byte> input, std::span<std::byte> outp
 
 /// Compresses input into a single Zstandard frame, which declares its content size, at a level from 1 to 22.
 void zstd_compress(std::span<const std::byte> input, int level, std::vector<std::byte>& output);
+
+/// Compresses inputs one after another into Zstandard frames, as zstd_compress() does, with one compression context.
+class zstd_encoder
+{
+public:
+    explicit zstd_encoder(int level);
+    zstd_encoder(const zstd_encoder&) = delete;
+    zstd_encoder& operator=(const zstd_encoder&) = delete;
+    ~zstd_encoder();
+
+    void compress(std::span<const std::byte> input, std::vector<std::byte>& output);
+
+private:
+    // The ZSTD_CCtx, which zstd.h declares.
+    struct state;
+    std::unique_ptr<state> state_;
+};
 
 } // namespace openxisf::detail

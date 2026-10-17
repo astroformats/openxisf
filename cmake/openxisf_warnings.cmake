@@ -16,20 +16,24 @@ function(openxisf_enable_warnings target)
             list(APPEND flags /WX)
         endif()
     elseif(MSVC)
-        # clang-cl maps -Wall to /Wall, which is -Weverything, so it takes /W4 (= -Wall -Wextra) instead.
+        # clang-cl maps -Wall to /Wall, which is -Weverything, so it takes /W4 (= -Wall -Wextra) instead. -Wdeprecated, as
+        # the public headers must pass it for consumers that include them without SYSTEM.
         list(APPEND flags
             /W4 -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast -Wcast-align
-            -Wnon-virtual-dtor -Woverloaded-virtual -Wdouble-promotion -Wformat=2)
+            -Wnon-virtual-dtor -Woverloaded-virtual -Wdouble-promotion -Wformat=2 -Wdeprecated)
         if(OPENXISF_WARNINGS_AS_ERRORS)
             list(APPEND flags /WX)
         endif()
     else()
-        # GCC, Clang and AppleClang.
+        # GCC, Clang and AppleClang. The deprecations, as the public headers must pass them for consumers that include
+        # them without SYSTEM: GCC enables -Wdeprecated by default, but not the copy of a class with a destructor.
         list(APPEND flags
             -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast -Wcast-align
             -Wnon-virtual-dtor -Woverloaded-virtual -Wdouble-promotion -Wformat=2)
         if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            list(APPEND flags -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wuseless-cast)
+            list(APPEND flags -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wuseless-cast -Wdeprecated-copy-dtor)
+        else()
+            list(APPEND flags -Wdeprecated)
         endif()
         if(OPENXISF_WARNINGS_AS_ERRORS)
             list(APPEND flags -Werror)

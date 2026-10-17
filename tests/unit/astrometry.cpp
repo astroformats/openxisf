@@ -18,11 +18,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -828,6 +830,26 @@ TEST(astrometry, removing_a_solution_keeps_the_properties_of_other_namespaces)
     EXPECT_TRUE(properties.contains("PCL:AstrometricSolution:Grid:Fingerprint"));
     EXPECT_EQ(astrometric_solution(properties).status(astrometric_layer::linear), astrometric_status::absent);
     EXPECT_EQ(openxisf::remove_astrometric_solution(properties), 0U);
+}
+
+// A unit decides how many properties its solution has, and every application that changes the geometry of an image
+// removes them. Removing them one at a time would scan the list for each one.
+TEST(astrometry, removing_a_solution_takes_one_pass_over_the_properties)
+{
+    constexpr std::size_t count = 1'500'000;
+    std::vector<openxisf::property> items;
+    items.reserve(count + 2);
+    items.push_back({.id = "Observation:Center:RA", .value = 83.8});
+    for (std::size_t i = 0; i < count; ++i) {
+        items.push_back({.id = "AstrometricSolution:Test:" + std::to_string(i), .value = std::int8_t{1}});
+    }
+    items.push_back({.id = "Observation:Center:Dec", .value = -5.4});
+    property_list properties(std::move(items));
+
+    EXPECT_EQ(openxisf::remove_astrometric_solution(properties), count);
+    ASSERT_EQ(properties.size(), 2U);
+    EXPECT_EQ(properties.begin()->id, "Observation:Center:RA");
+    EXPECT_EQ(std::next(properties.begin())->id, "Observation:Center:Dec");
 }
 
 } // namespace

@@ -29,8 +29,10 @@ namespace openxisf {
 ///   2026-03-14T01:59:26.535Z, the years -1 and 10000 that a reader returns for times with an offset from UTC included.
 ///
 /// The unit of the format is not appended. A width or a precision above 1024 counts as 1024, so that the format of a
-/// property read from a file cannot make a component longer than a few kilobytes. Float128 values are formatted from
-/// their nearest double (to_double()).
+/// property read from a file cannot make a component longer than a few kilobytes. It applies to each element of a
+/// vector or a matrix, so the text of a long one can take far more than its value: that of a vector of 64 MiB of
+/// bytes, within limits::max_ancillary_data, with a width of 1024, takes 64 GiB. format_element() writes one element
+/// at a time. Float128 values are formatted from their nearest double (to_double()).
 /// @throws usage_error for a TimePoint that is not a valid date and time.
 [[nodiscard]] OPENXISF_API std::string format_value(const property_value& value, const property_format& format = {});
 

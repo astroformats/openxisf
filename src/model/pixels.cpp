@@ -135,6 +135,7 @@ const image_info& typed_image_at(const unit& opened, std::size_t index, sample_f
 std::size_t typed_sample_count(const unit& opened, std::size_t index, sample_format format)
 {
     const image_info& info = typed_image_at(opened, index, format);
+    check_available(opened.blocks[opened.images.blocks[index]]);
     const std::uint64_t size = info.data_size();
     check_allocation(size, opened.limits, "the pixel data of image " + std::to_string(index) + " have");
     return info.geometry.sample_count();

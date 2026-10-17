@@ -76,6 +76,14 @@ void flush_directory(const std::string& path)
     if (handle < 0) {
         fail(errc::write_failed, "cannot open the directory of " + path, last_error());
     }
+#if defined(__APPLE__)
+    // As for a file (flush_to_disk()): fsync() leaves the new name in the cache of the drive, F_FULLFSYNC flushes it
+    // too.
+    if (::fcntl(handle, F_FULLFSYNC) == 0) {
+        (void)::close(handle);
+        return;
+    }
+#endif
     const int result = ::fsync(handle);
     const std::error_code error = last_error();
     (void)::close(handle);
@@ -111,11 +119,33 @@ std::string absolute_path(const std::string& path)
     return directory + path;
 }
 
+void check_replaceable(const std::string& path)
+{
+    // lstat() does not follow a symbolic link. rename() replaces anything but a directory, the node of a device too.
+    struct stat status{};
+    if (::lstat(path.c_str(), &status) == 0 && !S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode)) {
+        fail_not_regular(path);
+    }
+}
+
+bool is_directory(const std::string& path)
+{
+    struct stat status{};
+    return ::stat(path.c_str(), &status) == 0 && S_ISDIR(status.st_mode);
+}
+
 native_file native_file::open_for_reading(const std::string& path)
 {
-    // O_NONBLOCK keeps the open of a FIFO from waiting for a writer. It has no effect on regular files, which are the
-    // only ones accepted.
-    const int handle = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    // What is not a regular file is refused before it is opened, since opening a device can act on it, as opening a
+    // serial port resets some controllers; and again once it is open, since the path can name another file by then.
+    struct stat named{};
+    if (::stat(path.c_str(), &named) == 0 && !S_ISREG(named.st_mode)) {
+        fail_not_regular(path);
+    }
+    // O_NONBLOCK keeps the open of a FIFO from waiting for a writer, and O_NOCTTY the open of a terminal from making it
+    // the controlling terminal of the process. Neither has an effect on regular files, which are the only ones
+    // accepted.
+    const int handle = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     if (handle < 0) {
         fail(errc::open_failed, "cannot open " + path, last_error());
     }
