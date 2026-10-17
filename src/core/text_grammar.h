@@ -44,8 +44,9 @@ template <xisf_float T> [[nodiscard]] T parse_float(std::string_view text);
 [[nodiscard]] bool is_float_text(std::string_view text) noexcept;
 
 /// Checks that text is a floating point value of spec §8.3.3 within the range of Float128, and returns it without
-/// leading and trailing white space. Float128 values are kept as text. A value is out of range when it rounds beyond
-/// the largest finite Float128, as far as its first 64 significant digits tell.
+/// leading and trailing white space, or a non-finite value as NaN, +Inf or -Inf, the forms that encoders use. Float128
+/// values are kept as text. A value is out of range when it rounds beyond the largest finite Float128, as far as its
+/// first 64 significant digits tell.
 [[nodiscard]] std::string_view check_float128(std::string_view text);
 
 /// Parses a Boolean value (spec §8.3.4): true, false, 1 or 0, ignoring leading and trailing white space.

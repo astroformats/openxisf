@@ -9,6 +9,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <string>
 #include <vector>
 
 namespace {
@@ -36,6 +38,34 @@ TEST(diagnostic_log, records_every_diagnostic_in_order)
     EXPECT_EQ(diagnostics[2].severity, severity::error);
     EXPECT_EQ(diagnostics[2].context.attribute, "uid");
     EXPECT_TRUE(log.entries().empty());
+}
+
+// A header can hold a million problems, each of which would cost a diagnostic.
+TEST(diagnostic_log, lists_ten_thousand_diagnostics_the_last_of_which_counts_those_that_follow)
+{
+    constexpr std::size_t listed = 10'000;
+    diagnostic_log log(false);
+    for (std::size_t i = 1; i < listed; ++i) {
+        log.info(errc::unknown_element, "an info", {.element = "/xisf/x:Extension[" + std::to_string(i) + "]"});
+    }
+    log.warning(errc::invalid_uid, "the last diagnostic", {.element = "/xisf/Image[1]", .attribute = "uid"});
+    ASSERT_EQ(log.entries().size(), listed);
+    EXPECT_EQ(log.entries().back().message, "the last diagnostic");
+
+    // The last one stands for itself and those after it: their number, the severity of the most serious, and the code
+    // of the first of those.
+    log.info(errc::unknown_element, "an info");
+    log.error(errc::duplicate_uid, "an error", {.element = "/xisf/Image[2]"});
+    log.warning(errc::invalid_uid, "a warning");
+    log.error(errc::dangling_reference, "another error");
+    const std::vector<openxisf::diagnostic> diagnostics = log.release();
+    ASSERT_EQ(diagnostics.size(), listed);
+    EXPECT_EQ(diagnostics[listed - 2].context.element, "/xisf/x:Extension[9999]");
+    const openxisf::diagnostic& last = diagnostics.back();
+    EXPECT_EQ(last.severity, severity::error);
+    EXPECT_EQ(last.code, errc::duplicate_uid);
+    EXPECT_EQ(last.message, "5 more problems were found, which are not listed");
+    EXPECT_EQ(last.context, openxisf::error_context{});
 }
 
 TEST(diagnostic_log, an_error_throws_in_strict_mode)

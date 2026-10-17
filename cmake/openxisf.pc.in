@@ -11,4 +11,4 @@ URL: @PROJECT_HOMEPAGE_URL@
 Version: @PROJECT_VERSION@
 @OPENXISF_PC_REQUIRES_PRIVATE@
 Libs: -L${libdir} -l@OPENXISF_PC_LIBRARY@
-Cflags: -I${includedir}@OPENXISF_PC_CFLAGS@
+Cflags: -I${includedir}

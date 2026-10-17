@@ -28,7 +28,8 @@ namespace openxisf {
 struct fits_keyword
 {
     std::string name{};
-    /// The value as written in a FITS header, such as 'M31' with its quotes, or 300.
+    /// The value as written in a FITS header, such as 'M31' with its quotes, or 300. The specification asks encoders
+    /// not to pad it with spaces, as the fixed-length records of FITS do (spec §11.6.1); the writer writes it as given.
     std::string value{};
     std::string comment{};
 
@@ -82,7 +83,7 @@ struct display_function
 struct color_filter_array
 {
     /// The elements of the matrix, row by row from the top, left to right within a row, as they lie on the image: 0
-    /// (none or undefined), R, G, B, W (white or panchromatic), C, M or Y. Its length is width × height.
+    /// (none or undefined), R, G, B, W (white or panchromatic), C, M or Y. Its length is width * height.
     std::string pattern{};
     /// The size of the matrix, in pixels, above zero.
     std::uint64_t width = 0;
@@ -103,7 +104,13 @@ enum class resolution_unit : std::uint8_t
 /// The value of a unit attribute: "inch" or "cm".
 [[nodiscard]] constexpr std::string_view resolution_unit_name(resolution_unit unit) noexcept
 {
-    return unit == resolution_unit::inch ? "inch" : "cm";
+    switch (unit) {
+    case resolution_unit::inch:
+        return "inch";
+    case resolution_unit::centimeter:
+        return "cm";
+    }
+    return {};
 }
 
 /// The resolution of an image on a display medium (spec §11.11): pixels per unit of length along each axis. A
@@ -121,8 +128,10 @@ struct resolution
 
 /// A thumbnail (spec §11.12): a small representation of an image, with its pixel data. It is a two-dimensional Gray or
 /// RGB image of UInt8 or UInt16 samples, with at most one alpha channel, and its representable range is that of its
-/// sample format. A Thumbnail element is an Image element under another name, without bounds, colour filter array or
-/// thumbnail, so the members are those of image_info that it can have.
+/// sample format. Its width and height should not be greater than 1024 pixels, which the writer does not check. A
+/// Thumbnail element is an Image element under another name, without bounds, colour filter array or thumbnail, so the
+/// members are those of image_info that it can have, but with other defaults: UInt8 samples and the RGB colour space,
+/// where an image_info has UInt16 and Gray, the colour space that the specification gives an element without one.
 struct thumbnail
 {
     openxisf::geometry geometry{};
@@ -161,8 +170,9 @@ struct image_info
     openxisf::pixel_storage pixel_storage = openxisf::pixel_storage::planar;
     /// What the image is; empty when the unit does not say.
     std::optional<openxisf::image_type> image_type{};
-    /// The representable range as written (spec §11.5.1): required for floating point images, and empty when an
-    /// integer or complex image uses its default. representable_range() applies the defaults.
+    /// The representable range as written (spec §11.5.1): required for floating point images, optional for complex
+    /// images, whose range is undefined without it, and empty when an integer image uses its default.
+    /// representable_range() applies the default.
     std::optional<openxisf::bounds> bounds{};
     /// A pedestal added to every sample, at least 0 (spec §11.5.2).
     double offset = 0.0;
@@ -194,7 +204,7 @@ struct image_info
     /// The thumbnail; empty when there is none.
     std::optional<openxisf::thumbnail> thumbnail{};
 
-    /// The size of the pixel data, in bytes: geometry.sample_count() × sample_size(sample_format).
+    /// The size of the pixel data, in bytes: geometry.sample_count() * sample_size(sample_format).
     /// @throws usage_error (errc::arithmetic_overflow) when it does not fit in 64 bits.
     [[nodiscard]] OPENXISF_API std::uint64_t data_size() const;
 

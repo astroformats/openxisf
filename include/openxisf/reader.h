@@ -51,7 +51,8 @@ struct read_options
     /// stay empty, and the properties and tables with values in data blocks are left out, until
     /// reader::load_ancillary_data() loads them; the problems of those data are found then. Their identifiers are
     /// known: another property or table of the object with one of them is refused, as a full open refuses it, and a
-    /// mandatory metadata property left out is not reported missing.
+    /// mandatory metadata property left out is not reported missing. The model is not complete until then, so the
+    /// writer would lose those data, or refuse a thumbnail without pixels (writer).
     bool header_only = false;
     /// Opens the files of the external data blocks of a distributed unit (spec §10.2). When it is empty, a unit opened
     /// from a path gets file_resolver() for the directory of that path, with its default options, and a unit opened
@@ -85,20 +86,25 @@ struct pixel_read_options
 /// verifies the checksums of the blocks written in the header; attached blocks are verified when they are read. The
 /// external data blocks of a header file are located when it is opened: read_options::resolver opens each file once,
 /// and the block index of each data blocks file is read (spec §9.4), so that a block that cannot be found is
-/// unavailable, with a diagnostic; the files stay open as long as the reader exists. It
-/// describes each image and what is associated with it, and loads the ancillary data in data blocks, within
-/// limits::max_ancillary_data: ICC profiles, the pixels of thumbnails, and the values of properties and table cells
-/// (read_options::header_only defers them). Pixel data are read on request, with read_pixels().
-/// Problems confined to one object of the unit do not fail it: the object is unavailable, and a diagnostic says why
-/// (spec §7). A signed unit is read like any other; its signature is returned, not verified (signature()).
+/// unavailable, with a diagnostic; the files stay open as long as the reader exists. It describes each image and what
+/// is associated with it, and loads the ancillary data in data blocks, within limits::max_ancillary_data: ICC
+/// profiles, the pixels of thumbnails, and the values of properties and table cells (read_options::header_only defers
+/// them). Pixel data are read on request, with read_pixels(). Problems confined to one object of the unit do not fail
+/// it: the object is unavailable, and a diagnostic says why (spec §7). An external file whose source fails with
+/// io_error is such a problem, while its block index is read, for the blocks in the file, and while ancillary data are
+/// loaded from it, for the block being loaded; an io_error of the source of the unit fails the open. A signed unit is
+/// read like any other; its signature is returned, not verified (signature()).
 ///
 /// The reader refuses what affects safety or the meaning of the data, and reads departures from the specification that
 /// are unambiguous and harmless with a warning: among others, hexadecimal digits in uppercase, codec and checksum
-/// algorithm names in another case than the specification's, and characters that XML 1.0 does not allow, such as
-/// control characters other than tab, line feed and carriage return, which are kept as written. A compressed block or
-/// subblock whose compressed size equals its uncompressed size is read as stored, without decompression, as PixInsight
-/// writes and reads a subblock that its codec did not make smaller (write_options::subblock_size); the specification
-/// does not say so, so codec output of exactly the size of its input, from another encoder, is not decoded.
+/// algorithm names in another case than the specification's, FITS keyword names padded with trailing spaces, which are
+/// read without them, values of the Image namespace that spec §11.5.3.5 forbids, such as a frame number of 0, which are
+/// kept, a property or table that an object contains and names, or names twice, which it has once, and characters that
+/// XML 1.0 does not allow, such as control characters other than tab, line feed and carriage return, which are kept as
+/// written. A compressed block or subblock whose compressed size equals its uncompressed size is read as stored,
+/// without decompression, as PixInsight writes and reads a subblock that its codec did not make smaller
+/// (write_options::subblock_size); the specification does not say so, so codec output of exactly the size of its
+/// input, from another encoder, is not decoded.
 ///
 /// The reader owns its source, so a file stays open as long as its reader exists. Its const member functions can be
 /// called from any number of threads at once, pixel reads included; load_ancillary_data(), the only function that
@@ -155,10 +161,14 @@ public:
     /// The properties of the unit: those of its Metadata element, such as XISF:CreationTime (spec §11.4).
     [[nodiscard]] const property_list& metadata() const noexcept;
 
-    /// The standalone properties: the Property elements of the root element (spec §11.1).
+    /// The standalone properties: the Property elements of the root element (spec §11.1). Standalone properties belong
+    /// to no object (spec §8.4), so their identifiers need not be unique: the first of each is listed, among the
+    /// properties and tables, with a warning about each other (errc::duplicate_property_id), which a Reference still
+    /// associates with an image.
     [[nodiscard]] const property_list& properties() const noexcept;
 
-    /// The standalone table properties: the Table elements of the root element (spec §11.3), in document order.
+    /// The standalone table properties: the Table elements of the root element (spec §11.3), in document order, but
+    /// for those whose identifier a standalone property or table before them has (properties()).
     [[nodiscard]] std::span<const table> tables() const noexcept;
 
     /// The images of the unit (spec §11.5), in document order: each Image element, and the image that each Reference
@@ -185,9 +195,11 @@ public:
     [[nodiscard]] std::vector<std::byte> read_pixels(std::size_t index, const pixel_read_options& options = {}) const;
 
     /// Reads the pixel data of the image at index into destination, which must have exactly image(index).data_size()
-    /// bytes, with the exceptions of the other read_pixels(). Data that are not compressed and keep their storage
-    /// model are read straight into destination, so limits::max_allocation does not apply to them. When it throws,
-    /// destination may hold part of the data, but never data that failed their checksum.
+    /// bytes, with the exceptions of the other read_pixels(). Data that keep their storage model are read, or
+    /// decompressed, straight into destination, so limits::max_allocation applies only to what the read allocates
+    /// besides: the stored bytes of compressed data, and for byte-shuffled data the buffer of their size that they are
+    /// unshuffled from. When it throws, destination may hold part of the data, but never data that failed their
+    /// checksum.
     /// @throws usage_error when destination has another size.
     void read_pixels(std::size_t index, std::span<std::byte> destination, const pixel_read_options& options = {}) const;
 
@@ -213,7 +225,10 @@ public:
         read_pixels(index, std::as_writable_bytes(destination), options);
     }
 
-    /// The problems found while opening the unit, in the order they were found.
+    /// The problems found while opening the unit, in the order they were found: at most 10,000, since a header can hold
+    /// a million. When there are more, the last diagnostic stands for itself and all those after it: its message says
+    /// how many they are, and it has the severity of the most serious of them and the code of the first of those,
+    /// without a context.
     [[nodiscard]] std::span<const diagnostic> diagnostics() const noexcept;
 
     /// True unless the unit was opened with read_options::header_only and load_ancillary_data() has not been called.
@@ -231,8 +246,8 @@ public:
     void load_ancillary_data();
 
 private:
-    // The number of samples of the image at index, after checking that it has the given sample format and that its
-    // pixel data fit in limits::max_allocation, so that a typed read can allocate them.
+    // The number of samples of the image at index, after checking that it has the given sample format, that its data
+    // block is available and that its pixel data fit in limits::max_allocation, so that a typed read can allocate them.
     [[nodiscard]] std::size_t sample_count_of(std::size_t index, sample_format format) const;
 
     // Checks that the image at index has the given sample format, for a typed read into memory of the caller, which

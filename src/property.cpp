@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <bit>
 #include <limits>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 namespace openxisf {
 
@@ -189,6 +191,19 @@ property_value::property_value(std::string_view value) : value_(std::in_place_ty
 property_value::property_value(const char* value) : value_(std::in_place_type<std::string>, value) {}
 property_value::property_value(date_time value) noexcept
     : type_(property_type::time_point), value_(std::in_place_type<date_time>, value)
+{}
+
+// The copy is made from the value that other holds, with the constructor of std::variant for one alternative, and not
+// with the copy constructor of std::variant. That of libstdc++ 12 to 16, when the copy of the alternative throws, has
+// the storage of the variant destroy the alternative of the index variant_npos, which it takes for a valid one in a
+// variant whose alternatives never leave it valueless, as here: a failed allocation became undefined behaviour, a
+// crash, instead of std::bad_alloc. The constructor for one alternative throws before the storage exists.
+property_value::property_value(const property_value& other)
+    : type_(other.type_),
+      value_(std::visit(
+          [](const auto& held) { return storage(std::in_place_type<std::remove_cvref_t<decltype(held)>>, held); },
+          other.value_)),
+      rows_(other.rows_), columns_(other.columns_)
 {}
 
 property_value::property_value(property_type type, storage value) noexcept : type_(type), value_(std::move(value)) {}

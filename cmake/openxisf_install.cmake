@@ -15,7 +15,7 @@ install(TARGETS openxisf
     INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
 install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/openxisf" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
-install(FILES "${PROJECT_BINARY_DIR}/include/openxisf/version.h"
+install(FILES "${PROJECT_BINARY_DIR}/include/openxisf/version.h" "${PROJECT_BINARY_DIR}/include/openxisf/linkage.h"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/openxisf")
 
 if(MSVC AND OPENXISF_SHARED)
@@ -66,7 +66,6 @@ foreach(directory LIBDIR INCLUDEDIR)
     endif()
 endforeach()
 set(OPENXISF_PC_REQUIRES_PRIVATE "")
-set(OPENXISF_PC_CFLAGS "")
 if(NOT OPENXISF_SHARED)
     set(requires pugixml zlib liblz4 libzstd)
     if(OPENXISF_WITH_TBB)
@@ -77,7 +76,6 @@ if(NOT OPENXISF_SHARED)
     endif()
     list(JOIN requires ", " requires_list)
     set(OPENXISF_PC_REQUIRES_PRIVATE "Requires.private: ${requires_list}")
-    set(OPENXISF_PC_CFLAGS " -DOPENXISF_STATIC_DEFINE")
 endif()
 # The file names the library of the configuration that is installed, whose name ends with a d in a Debug build, so it is
 # generated for each configuration, which a multi-configuration generator knows only then. pkg-config has no
@@ -100,5 +98,4 @@ else()
         RENAME openxisf.pc)
 endif()
 
-install(FILES "${PROJECT_SOURCE_DIR}/LICENSE" "${PROJECT_SOURCE_DIR}/NOTICE"
-    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/openxisf")
+install(FILES "${PROJECT_SOURCE_DIR}/LICENSE" "${PROJECT_SOURCE_DIR}/NOTICE" DESTINATION "${CMAKE_INSTALL_DOCDIR}")

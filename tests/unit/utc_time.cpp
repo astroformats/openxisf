@@ -52,20 +52,28 @@ TEST(utc_time, known_dates)
 // The calendar of the C++ standard library is the independent reference.
 TEST(utc_time, agrees_with_the_standard_calendar)
 {
-    const auto check = [](std::int64_t days) {
+    // The first day that differs stops the test.
+    const auto check = [](std::int64_t days) -> testing::AssertionResult {
         const std::chrono::year_month_day expected{std::chrono::sys_days{std::chrono::days{days}}};
         const civil_date date = civil_from_days(days);
-        ASSERT_EQ(date.year, static_cast<int>(expected.year())) << days;
-        ASSERT_EQ(date.month, static_cast<unsigned>(expected.month())) << days;
-        ASSERT_EQ(date.day, static_cast<unsigned>(expected.day())) << days;
-        ASSERT_EQ(days_from_civil(date), days);
+        if (date.year != static_cast<int>(expected.year()) || date.month != static_cast<unsigned>(expected.month()) ||
+            date.day != static_cast<unsigned>(expected.day())) {
+            return testing::AssertionFailure()
+                   << "day " << days << " is " << date.year << "-" << date.month << "-" << date.day << ", not "
+                   << static_cast<int>(expected.year()) << "-" << static_cast<unsigned>(expected.month()) << "-"
+                   << static_cast<unsigned>(expected.day());
+        }
+        if (days_from_civil(date) != days) {
+            return testing::AssertionFailure() << "day " << days << " comes back as " << days_from_civil(date);
+        }
+        return testing::AssertionSuccess();
     };
     // Every day from 1600 to 2400, then a sample of the range of the standard calendar.
     for (std::int64_t days = -135'140; days <= 157'000; ++days) {
-        check(days);
+        ASSERT_TRUE(check(days));
     }
     for (std::int64_t days = -11'000'000; days <= 11'000'000; days += 997) {
-        check(days);
+        ASSERT_TRUE(check(days));
     }
 }
 

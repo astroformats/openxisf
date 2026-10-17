@@ -137,6 +137,16 @@ writer::writer(write_options options) : state_(std::make_unique<state>())
 {
     // The range of the level is that of every codec.
     (void)detail::codec_level(detail::compression_codec::zstd, options.compression_level);
+    // A value outside an enumeration, which a cast can give, would be written as its last codec or algorithm.
+    if (options.codec && *options.codec > codec::zstd) {
+        throw usage_error(errc::invalid_argument, "the codec " + std::to_string(static_cast<int>(*options.codec)) +
+                                                      " is not one of the enumeration codec");
+    }
+    if (options.checksum && *options.checksum > checksum_algorithm::sha3_512) {
+        throw usage_error(errc::invalid_argument, "the checksum algorithm " +
+                                                      std::to_string(static_cast<int>(*options.checksum)) +
+                                                      " is not one of the enumeration checksum_algorithm");
+    }
     state_->options = std::move(options);
 }
 

@@ -153,6 +153,9 @@ TEST(property_text, complex_numbers_and_their_non_finite_parts)
     EXPECT_EQ(value.imag(), -std::numeric_limits<double>::infinity());
     EXPECT_EQ(parse_complex<float>("(-0,0)").real(), 0.0F);
     EXPECT_TRUE(std::signbit(parse_complex<float>("(-0,0)").real()));
+    // A Complex128 keeps its parts as Float128 values do: non-finite ones in the forms that encoders use (spec §8.3.3).
+    EXPECT_EQ(check_complex128("(-nan,inf)"), "(NaN,+Inf)");
+    EXPECT_EQ(check_complex128("( +.5 , -inf )"), "(+.5,-Inf)");
 }
 
 TEST(property_text, every_value_attribute_parses_back_from_its_text)

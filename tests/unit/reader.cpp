@@ -18,7 +18,9 @@
 
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -101,6 +103,70 @@ TEST(reader, the_limits_of_the_options_apply)
         errc::too_many_xml_elements, [&header] { (void)open_header(header, {.limits = {.max_xml_elements = 3}}); }));
     EXPECT_TRUE(throws<openxisf::limit_error>(
         errc::xml_too_deep, [&header] { (void)open_header(header, {.limits = {.max_xml_depth = 2}}); }));
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+// What untrusted headers cost
+//
+// Each test opens a header made of one construct repeated up to the default limits. A cost that grows faster than the
+// header takes hours there, which the timeout of the test presets stops, where these tests take a second or so. Costs
+// of memory are in allocation/reader.cpp.
+
+TEST(reader, a_header_of_comments_opens_in_time_linear_in_its_size)
+{
+    constexpr std::size_t count = 8'000'000;
+    std::string comments;
+    comments.reserve(count * 7);
+    for (std::size_t i = 0; i < count; ++i) {
+        comments += "<!---->";
+    }
+    const reader file = open_header(header_xml(comments));
+    EXPECT_TRUE(no_diagnostics(file.diagnostics()));
+}
+
+// Each unknown element is a warning, and the root element has a long prefix for the XISF namespace, which the paths of
+// the diagnostics leave out.
+TEST(reader, a_million_unknown_elements_give_ten_thousand_diagnostics)
+{
+    constexpr std::size_t count = 999'000;
+    const std::string prefix(200, 'p');
+    const std::string_view xisf = "http://www.pixinsight.com/xisf";
+    std::string header = std::string(openxisf::test::xml_declaration) + "<" + prefix +
+                         ":xisf version=\"1.0\" xmlns:" + prefix + "=\"" + std::string(xisf) + "\" xmlns=\"" +
+                         std::string(xisf) + "\"><Metadata>" + std::string(openxisf::test::mandatory_metadata) +
+                         "</Metadata>";
+    header.reserve(header.size() + (count * 6) + prefix.size() + 8);
+    for (std::size_t i = 0; i < count; ++i) {
+        header += "<Foo/>";
+    }
+    header += "</" + prefix + ":xisf>";
+
+    const reader file = open_header(header);
+    const std::span<const openxisf::diagnostic> diagnostics = file.diagnostics();
+    ASSERT_EQ(diagnostics.size(), 10'000U);
+    EXPECT_EQ(diagnostics.front().context.element, "/xisf/Foo[1]");
+    EXPECT_EQ(diagnostics[9'998].context.element, "/xisf/Foo[9999]");
+    EXPECT_EQ(diagnostics.back().severity, severity::warning);
+    EXPECT_EQ(diagnostics.back().code, errc::unknown_element);
+    EXPECT_EQ(diagnostics.back().message, "989001 more problems were found, which are not listed");
+}
+
+// Each Reference that names nothing is an error.
+TEST(reader, a_million_dangling_references_give_ten_thousand_diagnostics)
+{
+    constexpr std::size_t count = 999'000;
+    std::string references;
+    references.reserve(count * 20);
+    for (std::size_t i = 0; i < count; ++i) {
+        references += R"(<Reference ref="q"/>)";
+    }
+    const reader file = open_header(header_xml(references));
+    const std::span<const openxisf::diagnostic> diagnostics = file.diagnostics();
+    ASSERT_EQ(diagnostics.size(), 10'000U);
+    EXPECT_EQ(diagnostics.front().code, errc::dangling_reference);
+    EXPECT_EQ(diagnostics.back().severity, severity::error);
+    EXPECT_EQ(diagnostics.back().code, errc::dangling_reference);
+    EXPECT_EQ(diagnostics.back().message, "989001 more problems were found, which are not listed");
 }
 
 // -----------------------------------------------------------------------------------------------------------------

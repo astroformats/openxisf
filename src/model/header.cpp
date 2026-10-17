@@ -86,7 +86,7 @@ bool is_root_name(std::string_view name, const namespace_scope& scope) noexcept
 pugi::xml_node check_root(const pugi::xml_document& document, diagnostic_log& log)
 {
     const pugi::xml_node root = document.document_element();
-    const std::string path = "/" + std::string(root.name());
+    const std::string path = "/" + std::string(local_name(root.name()));
     namespace_scope scope;
     scope.enter(root);
     if (!is_root_name(root.name(), scope)) {
@@ -308,7 +308,7 @@ void check_signature(const pugi::xml_node& signature, namespace_scope& scope, co
     if (id.empty()) {
         log.warning(errc::invalid_signature,
                     "the root element has no id attribute, by which the signature must name it",
-                    {.element = "/" + std::string(root.name()), .attribute = "id"});
+                    {.element = "/" + std::string(local_name(root.name())), .attribute = "id"});
         return;
     }
     scope.enter(signed_info);
@@ -320,7 +320,7 @@ void check_signature(const pugi::xml_node& signature, namespace_scope& scope, co
     if (!named) {
         log.warning(errc::invalid_signature,
                     "no Reference element of the signature names the root element, " + quote("#" + std::string(id)),
-                    {.element = path + "/" + std::string(signed_info.name()) + "[1]"});
+                    {.element = path + "/" + std::string(local_name(signed_info.name())) + "[1]"});
     }
 }
 
@@ -334,7 +334,7 @@ public:
     after_root(const pugi::xml_node& root, const limits& limits, diagnostic_log& log)
         : root_(root), limits_(limits), log_(log)
     {
-        positions_.emplace(root.name(), std::size_t{1});
+        positions_.emplace(local_name(root.name()), std::size_t{1});
     }
 
     // An element after the root element. text is what its document was parsed from.
@@ -391,10 +391,12 @@ public:
     }
 
 private:
-    // The path of the next element after the root element with this name: its position among those with its name.
+    // The path of the next element after the root element with this name: its local name, and its position among those
+    // with that local name, as in the paths of the outline.
     std::string path_of(std::string_view name)
     {
-        return "/" + std::string(name) + "[" + std::to_string(++positions_[std::string(name)]) + "]";
+        const std::string step(local_name(name));
+        return "/" + step + "[" + std::to_string(++positions_[step]) + "]";
     }
 
     pugi::xml_node root_;
@@ -413,7 +415,7 @@ parsed_header parse_header(std::string_view text, std::uint64_t offset, const li
         offset += utf8_byte_order_mark.size();
     }
     well_formed_part part = parse_well_formed_part(text, offset, limits);
-    parsed_header header{.document = std::move(part.document)};
+    parsed_header header{.document = std::move(part.document), .text = text};
     check_declaration(*header.document, text, offset, log);
     // Such a character means what it says, and is kept; only the first one is reported, of the text that was parsed:
     // what follows where the header stops being well-formed is not read, only ignored or, for a signature, kept as

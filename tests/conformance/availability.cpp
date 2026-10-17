@@ -91,8 +91,8 @@ TEST(conformance_availability, the_parts_of_core_elements_are_not_allowed_at_the
 TEST(conformance_availability, an_extension_element_inside_a_core_element_is_ignored_with_a_warning)
 {
     // Extension elements belong at the top of the header; core elements contain only elements of the specification.
-    expect_ignored_with_a_warning({.header = header_xml(image_xml({}, R"(<e:Note xmlns:e="urn:example"/>)")),
-                                   .path = "/xisf/Image[1]/e:Note[1]"});
+    expect_ignored_with_a_warning(
+        {.header = header_xml(image_xml({}, R"(<e:Note xmlns:e="urn:example"/>)")), .path = "/xisf/Image[1]/Note[1]"});
 }
 
 TEST(conformance_availability, what_an_ignored_element_contains_is_not_read)

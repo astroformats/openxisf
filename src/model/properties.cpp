@@ -18,6 +18,7 @@
 #include <limits>
 #include <optional>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -46,6 +47,10 @@ struct property_set
     std::unordered_set<std::string> ids{};
     std::vector<std::size_t> elements{};
     std::vector<std::string> deferred_ids{};
+    // The element that associated each Property element with the object, by the index of the Property element.
+    std::unordered_map<std::size_t, std::size_t> associations{};
+    // The standalone properties, whose identifiers need not be unique, since they belong to no object (spec §8.4).
+    bool standalone = false;
 };
 
 // A Property element as read: its property, or nothing when it is unavailable or its value is left in its data block,
@@ -70,6 +75,7 @@ public:
         read_elements();
         count_uses();
         solution_checked_.assign(properties_.size(), false);
+        image_value_checked_.assign(properties_.size(), false);
         unit_properties result;
         result.metadata = metadata();
         element_properties standalone = collect(no_element);
@@ -170,10 +176,26 @@ private:
         if (id.empty()) {
             return;
         }
+        // A Property element that the object contains and names, or names twice, is one property of it: the
+        // Reference that associates it again, after or before the element itself, is redundant.
+        if (const auto [earlier, added] = set.associations.try_emplace(target, by); !added) {
+            log_.warning(errc::invalid_reference,
+                         "the Reference names " + outline_.path(target) + ", which is already associated with " +
+                             std::string(owner) + ": it is the same property, associated once",
+                         {.element = outline_.path(by == target ? earlier->second : by), .attribute = "ref"});
+            return;
+        }
         const error_context context{.element = outline_.path(by), .attribute = by == target ? "id" : "ref"};
         if (set.ids.contains(id)) {
-            log_.error(errc::duplicate_property_id,
-                       "another property of " + std::string(owner) + " has the identifier " + quote(id), context);
+            if (set.standalone) {
+                log_.warning(errc::duplicate_property_id,
+                             "another standalone property has the identifier " + quote(id) +
+                                 ", so only the first is listed with them; a Reference to this one still associates it",
+                             context);
+            } else {
+                log_.error(errc::duplicate_property_id,
+                           "another property of " + std::string(owner) + " has the identifier " + quote(id), context);
+            }
             return;
         }
         if (!found) {
@@ -205,13 +227,16 @@ private:
     element_properties collect(std::size_t owner)
     {
         const std::string name = owner == no_element ? "the root element" : outline_.path(owner);
-        property_set set;
+        property_set set{.standalone = owner == no_element};
         for_each_child(owner, [&](std::size_t index) {
             if (const std::optional<std::size_t> target = property_of(index)) {
                 add(set, *target, index, name);
             }
         });
         check_solution_types(set);
+        if (owner != no_element) {
+            check_image_values(set);
+        }
         return {.element = owner,
                 .path = owner == no_element ? std::string() : name,
                 .properties = property_list(std::move(set.items)),
@@ -239,7 +264,7 @@ private:
 
         if (first == no_element) {
             log_.warning(errc::invalid_metadata, "the unit has no Metadata element",
-                         {.element = "/" + std::string(outline_.root.name())});
+                         {.element = outline_.path(no_element)});
         } else {
             for (const std::string_view id : mandatory_metadata) {
                 if (!set.ids.contains(std::string(id))) {
@@ -381,6 +406,33 @@ private:
         }
     }
 
+    // The values of the Image namespace of an image or a thumbnail that spec §11.5.3.5 forbids are kept, with a warning
+    // about each Property element once, as a reader of 1.0.0 kept them without one, and about the object for a
+    // subgroup without a group.
+    void check_image_values(const property_set& set)
+    {
+        for (std::size_t i = 0; i < set.items.size(); ++i) {
+            const std::size_t slot = slots_[set.elements[i]];
+            if (image_value_checked_[slot]) {
+                continue;
+            }
+            image_value_checked_[slot] = true;
+            if (const std::optional<std::string> problem = forbidden_image_value(set.items[i])) {
+                log_.warning(errc::invalid_property, *problem + "; it is kept",
+                             {.element = outline_.path(set.elements[i]), .attribute = "value"});
+            }
+        }
+        if (set.ids.contains("Image:SubgroupId") && !set.ids.contains("Image:GroupId")) {
+            // A subgroup whose value is left in its data block has no element here; a full open reports it.
+            const auto subgroup = std::ranges::find(set.items, "Image:SubgroupId", &property::id);
+            if (subgroup != set.items.end()) {
+                const auto index = static_cast<std::size_t>(subgroup - set.items.begin());
+                log_.warning(errc::invalid_property, std::string(subgroup_without_group) + "; it is kept",
+                             {.element = outline_.path(set.elements[index]), .attribute = "id"});
+            }
+        }
+    }
+
     // A format specifier only says how to show the value, so a malformed one is dropped (spec §8.4.3). TimePoint
     // properties have none (spec §8.4.3.1).
     std::optional<property_format> read_format(const pugi::xml_node& node, const std::string& path, property_type type)
@@ -416,6 +468,8 @@ private:
     std::vector<std::size_t> uses_{};
     // Whether the type of each property of an astrometric solution has been checked.
     std::vector<bool> solution_checked_{};
+    // Whether the value of each property of an image or a thumbnail has been checked against spec §11.5.3.5.
+    std::vector<bool> image_value_checked_{};
 };
 
 } // namespace

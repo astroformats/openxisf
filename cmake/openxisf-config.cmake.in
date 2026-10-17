@@ -8,7 +8,9 @@ include(CMakeFindDependencyMacro)
 # Only a static library needs its private dependencies at link time.
 if(NOT @OPENXISF_SHARED@)
     find_dependency(pugixml CONFIG)
-    find_dependency(ZLIB)
+    # CMake's module, which defines ZLIB::ZLIB, also for a consumer that prefers CMake packages: that of zlib 1.3.2
+    # names the target of a static library ZLIB::ZLIBSTATIC.
+    find_dependency(ZLIB MODULE)
     if(@OPENXISF_WITH_TBB@)
         find_dependency(TBB CONFIG)
     endif()

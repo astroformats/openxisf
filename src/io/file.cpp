@@ -19,20 +19,16 @@ namespace openxisf {
 
 namespace {
 
-// A name in the directory of target: .openxisf-<16 hexadecimal digits>.tmp. A fixed length keeps it within the limits
-// of the file system whatever the name of the target.
+// A name in the directory of target, which is absolute and so has a separator: .openxisf-<16 hexadecimal digits>.tmp. A
+// fixed length keeps it within the limits of the file system whatever the name of the target.
 std::string temporary_path(std::string_view target, std::uint64_t random)
 {
 #if defined(_WIN32)
-    std::size_t end = target.find_last_of("/\\");
-    if (end == std::string_view::npos && target.size() >= 2 && target[1] == ':') {
-        // A drive-relative path such as C:name.
-        end = 1;
-    }
+    const std::size_t separator = target.find_last_of("/\\");
 #else
-    const std::size_t end = target.find_last_of('/');
+    const std::size_t separator = target.find_last_of('/');
 #endif
-    std::string path(target.substr(0, end == std::string_view::npos ? 0 : end + 1));
+    std::string path(target.substr(0, separator + 1));
     path += ".openxisf-";
     path += detail::fixed_width_hex(random);
     path += ".tmp";
@@ -122,6 +118,8 @@ file_sink::file_sink(std::string_view path, file_sink_options options)
     detail::check_path_argument(path, "the path");
     // finish() replaces the file that the path names now, whatever the current directory is by then.
     std::string target = detail::absolute_path(std::string(path));
+    // A rename would replace a FIFO, a socket or a device, and fails on a directory only once the unit is written.
+    detail::check_replaceable(target);
     // A name taken by another file is tried again with another random number, which only a crowded directory needs.
     detail::xoshiro256starstar random = detail::xoshiro256starstar::from_random_device();
     for (int attempt = 0; attempt < 16; ++attempt) {

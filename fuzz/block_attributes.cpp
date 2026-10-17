@@ -4,7 +4,9 @@
 // The attributes of data blocks. The input holds, one per line: location, byteOrder, checksum, compression, subblocks,
 // the element (Image, unless the line starts with P for a Property or C for an ICCProfile), the encoding of a Data
 // element (none when the line is empty), and the character data of the element or of its Data element; whatever
-// follows is attached to the file after the header. An empty line leaves its attribute out.
+// follows is attached to the file after the header. An empty line leaves its attribute out. The Property is a ByteArray
+// without a length attribute, which the reader takes from its block, with a warning, so that the reader loads and
+// decodes a block of any size as the value of the property.
 //
 // Each parser takes its line: it returns a value that respects its invariants, or throws the error of a malformed or an
 // unsupported value. Then a unit with that element is opened: every block that is available reads, and what it returns
@@ -143,7 +145,7 @@ std::vector<std::byte> unit_of(const fields& input)
     std::string start = R"(<Image geometry="1:1:1" sampleFormat="UInt8" colorSpace="Gray")";
     std::string end = "</Image>";
     if (input.lines[5].starts_with('P')) {
-        start = R"(<Property id="Fuzz:Value" type="ByteArray" length="1")";
+        start = R"(<Property id="Fuzz:Value" type="ByteArray")";
         end = "</Property>";
     } else if (input.lines[5].starts_with('C')) {
         start = "<ICCProfile";

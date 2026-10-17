@@ -22,16 +22,15 @@ namespace openxisf {
 
 /// The geometry of a two-dimensional image once turned to an orientation: its width and height are exchanged by the
 /// orientations that rotate it by 90 degrees.
-/// @throws usage_error when the geometry is not two-dimensional.
-[[nodiscard]] OPENXISF_API openxisf::geometry oriented_geometry(const openxisf::geometry& geometry, orientation turn);
+/// @throws usage_error when size is not two-dimensional.
+[[nodiscard]] OPENXISF_API geometry oriented_geometry(const geometry& size, orientation turn);
 
 /// The pixel data of a two-dimensional image turned to an orientation, in the same storage model and sample format:
-/// the pixels of an image of oriented_geometry(). pixels holds the samples of an image of the given geometry, of
+/// the pixels of an image of oriented_geometry(). pixels holds the samples of an image of geometry size, of
 /// sample_size bytes each, in the storage model storage.
-/// @throws usage_error when the geometry is not two-dimensional, sample_size is zero, or pixels does not hold the
-///         samples of the geometry.
-[[nodiscard]] OPENXISF_API std::vector<std::byte> orient_pixels(std::span<const std::byte> pixels,
-                                                                const openxisf::geometry& geometry,
+/// @throws usage_error when size is not two-dimensional, sample_size is zero, or pixels does not hold the samples of
+///         size.
+[[nodiscard]] OPENXISF_API std::vector<std::byte> orient_pixels(std::span<const std::byte> pixels, const geometry& size,
                                                                 std::size_t sample_size, pixel_storage storage,
                                                                 orientation turn);
 

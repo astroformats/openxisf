@@ -20,6 +20,11 @@ namespace openxisf::test {
 /// Unchanged on other systems.
 [[nodiscard]] std::filesystem::path long_form(const std::filesystem::path& path);
 
+/// Whether Windows makes the UTF-8 path a path of its device namespace, \\.\NAME, as it makes NUL in any directory, and
+/// before Windows 11 also CON, AUX, PRN, COM1 to COM9 and LPT1 to LPT9, with or without an extension. False on other
+/// systems.
+[[nodiscard]] bool is_device_name(std::string_view path);
+
 /// A new, empty directory in the temporary directory of the system, removed with its content on destruction, so that
 /// a test leaves nothing behind whether it passes or fails.
 class temp_directory

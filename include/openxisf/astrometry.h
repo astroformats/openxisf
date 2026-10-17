@@ -104,7 +104,7 @@ struct astrometric_projection
     friend bool operator==(const astrometric_projection&, const astrometric_projection&) = default;
 };
 
-/// The second layer of an astrometric solution (spec §11.5.3.7.3): a 3 × 3 matrix in each direction, row by row,
+/// The second layer of an astrometric solution (spec §11.5.3.7.3): a 3 x 3 matrix in each direction, row by row,
 /// acting on homogeneous coordinates.
 struct projective_transformations
 {
@@ -152,7 +152,8 @@ public:
     /// is missing"; empty when the layer is available or absent.
     [[nodiscard]] const std::string& problem(astrometric_layer layer) const noexcept;
 
-    /// The value of AstrometricSolution:Version, such as "1.0"; empty when there is none.
+    /// The value of AstrometricSolution:Version, such as "1.0"; empty when there is none, or when it is not a String,
+    /// which makes the first layer inconsistent.
     [[nodiscard]] const std::string& version() const noexcept;
 
     /// The first layer; empty when it is not available.
@@ -173,7 +174,7 @@ public:
 
     /// The image coordinates of a point of the sky, through the highest layer available. Empty when the point has none:
     /// beyond the domain of the projection, where a projective transformation is undefined, or when the point is not
-    /// finite or its declination is beyond ±90. The point may lie outside the image.
+    /// finite or its declination is beyond +/-90. The point may lie outside the image.
     /// @throws usage_error when no layer is available.
     [[nodiscard]] std::optional<image_point> celestial_to_image(celestial_point point) const;
 
@@ -195,7 +196,8 @@ private:
 
 /// Removes every property of the AstrometricSolution namespace from properties, as an encoder must when an image
 /// undergoes a geometric transformation that its solution does not follow (spec §11.5.3.7.8). Properties of other
-/// namespaces are kept, those of applications included. Returns the number removed.
+/// namespaces are kept, in their order, those of applications included. Returns the number removed. It takes time
+/// linear in the number of properties, and leaves them unchanged when it throws.
 OPENXISF_API std::size_t remove_astrometric_solution(property_list& properties);
 
 } // namespace openxisf

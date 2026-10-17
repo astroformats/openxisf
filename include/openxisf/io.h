@@ -86,8 +86,8 @@ public:
     /// The default implementation throws usage_error.
     virtual void rewrite(std::uint64_t offset, std::span<const std::byte> data);
 
-    /// Completes the output after its last byte: flushes it, and commits it where that applies. Nothing can be written
-    /// afterwards. Does nothing by default.
+    /// Completes the output after its last byte: flushes it, and commits it where that applies. Nothing may be written
+    /// afterwards, which file_sink refuses and other sinks need not check. Does nothing by default.
     virtual void finish();
 };
 
@@ -98,10 +98,12 @@ public:
 class OPENXISF_API file_source final : public input_source
 {
 public:
-    /// Opens the file at path, which is UTF-8 on every platform.
+    /// Opens the file at path, which is UTF-8 on every platform. What the system says is not a regular file is refused
+    /// before it is opened, since opening a device can act on it: on Windows, a device name such as NUL in any
+    /// directory.
     /// @throws usage_error when path is empty or not valid UTF-8.
-    /// @throws io_error when the file cannot be opened (errc::open_failed) or is not a regular file
-    ///         (errc::not_a_regular_file).
+    /// @throws io_error when the file cannot be opened (errc::open_failed) or is not a regular file, such as a
+    ///         directory, the root of a drive or a share among them, or a device (errc::not_a_regular_file).
     explicit file_source(std::string_view path);
     ~file_source() override;
 
@@ -133,19 +135,24 @@ struct file_sink_options
 /// behind. Supports rewrite().
 ///
 /// The new file is created like any new file: it has the permissions that the system gives one, not those of the file
-/// it replaces. A target that is a symbolic link is itself replaced by the new file; the file that it points to is
-/// left as it is. On Windows, a target that another program has open is replaced only when that program let others
-/// delete it (`FILE_SHARE_DELETE`), as file_source does, and a target with the read-only attribute is not replaced;
-/// otherwise finish() fails. POSIX systems replace a target that cannot be written, as the directory allows.
+/// it replaces. A target that exists must be a regular file or a link: a directory, a FIFO, a socket or a device is
+/// refused before anything is created. A target that is a symbolic link, or a junction on Windows, is itself replaced
+/// by the new file; what it points to is left as it is. On Windows, a target that another program has open is replaced
+/// only when that program let others delete it (`FILE_SHARE_DELETE`), as file_source does, and a target with the
+/// read-only attribute is not replaced; otherwise finish() fails. That needs a file system that renames with POSIX
+/// semantics, as NTFS does from Windows 10 1607 on: on others, such as FAT32, exFAT and some network shares, finish()
+/// fails while any program has the target open, a reader of the unit being replaced included. POSIX systems replace a
+/// target that cannot be written, as the directory allows.
 class OPENXISF_API file_sink final : public output_sink
 {
 public:
     /// Creates the temporary file for a target at path, which is UTF-8 on every platform. A relative path is taken
     /// from the current directory now: finish() replaces that target, whatever the current directory is by then.
     /// @throws usage_error when path is empty or not valid UTF-8.
-    /// @throws io_error when the temporary file cannot be created, or the current directory of a relative path cannot
-    ///         be found (errc::open_failed), or when the system provides no random data for its name
-    ///         (errc::entropy_unavailable).
+    /// @throws io_error when the target is a directory, a FIFO, a socket or a device, such as /dev/null, or NUL on
+    ///         Windows in any directory (errc::not_a_regular_file); when the temporary file cannot be created, or the
+    ///         current directory of a relative path cannot be found (errc::open_failed); or when the system provides no
+    ///         random data for its name (errc::entropy_unavailable).
     explicit file_sink(std::string_view path, file_sink_options options = {});
     ~file_sink() override;
 
@@ -284,11 +291,13 @@ struct external_reference
 /// Opens the file of an external reference, for a reader. Returning null refuses it. Throwing io_error or
 /// unsupported_error says that it cannot be opened, or must not be. The data blocks in the file are then unavailable,
 /// with an error diagnostic of the code of the exception, or errc::unsupported_location for null; a strict open, and a
-/// read of such a block, throw an exception of the same class and code, with the system error of an io_error, as they
-/// do for an io_error of the source while the block index of a data blocks file is read. Any other exception passes
-/// through and fails the open. A resolver is called while a unit is opened, on that thread, once for each file, and
-/// again when reader::load_ancillary_data() opens the unit again; the reader keeps the source it returns as long as it
-/// exists.
+/// read of such a block, throw an exception of the same class and code, with the system error of an io_error. So does
+/// an io_error of the source that the resolver returned: while the block index of a data blocks file is read, for the
+/// blocks in the file, and while ancillary data are loaded from the file (the value of a property, an ICC profile, the
+/// pixels of a thumbnail), at the open or in reader::load_ancillary_data(), for the block being loaded. Any other
+/// exception passes through and fails the open. A resolver is called while a unit is opened, on that thread, once for
+/// each file, and again when reader::load_ancillary_data() opens the unit again; the reader keeps the source it returns
+/// as long as it exists.
 using external_resolver = std::function<std::unique_ptr<input_source>(const external_reference& reference)>;
 
 /// Options of file_resolver().
@@ -301,15 +310,19 @@ struct file_resolver_options
 };
 
 /// A resolver of `path()` locations to regular files. A relative path is resolved from header_directory, and must lead
-/// to a file inside that directory once symbolic links are followed (errc::location_not_allowed otherwise). Paths
-/// follow UNIX syntax (spec §10.3), so on Windows a path with a backslash, a colon or another character that a file
-/// name cannot hold names no file (errc::unsupported_location). `url()` locations are refused
+/// to a file inside that directory once symbolic links are followed (errc::location_not_allowed otherwise). Inside is a
+/// matter of paths: a hard link in the directory to a file elsewhere, or a directory on which another file system is
+/// mounted, is inside. Paths follow UNIX syntax (spec §10.3), so on Windows a path with a backslash, a colon or another
+/// character that a file name cannot hold names no file (errc::unsupported_location). `url()` locations are refused
 /// (errc::unsupported_location).
 ///
 /// A missing file is errc::open_failed, and a file that is not a regular file, such as a directory or a device,
-/// errc::not_a_regular_file. The checks protect against what a unit names, not against programs that change the
-/// directory tree while a unit is opened. A relative header_directory is taken from the current directory when the
-/// resolver is made, so that a unit opened by a relative path finds its files when it is read again from another one.
+/// errc::not_a_regular_file, as for file_source, which refuses a device before it is opened. A relative path is
+/// resolved as POSIX resolves one on every system: a `.` or `..` step follows a directory (errc::open_failed after a
+/// file, as in `data.xisb/.`), and a path that ends with a separator or such a step names a directory. The checks
+/// protect against what a unit names, not against programs that change the directory tree while a unit is opened. A
+/// relative header_directory is taken from the current directory when the resolver is made, so that a unit opened by a
+/// relative path finds its files when it is read again from another one.
 /// @throws usage_error when header_directory is empty or not valid UTF-8.
 /// @throws io_error (errc::open_failed) when header_directory is relative and the current directory cannot be found.
 [[nodiscard]] OPENXISF_API external_resolver file_resolver(std::string_view header_directory,

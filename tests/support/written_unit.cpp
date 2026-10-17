@@ -19,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace openxisf::test {
@@ -57,7 +58,7 @@ namespace {
 void record(const std::function<void(const std::filesystem::path& directory, const std::string& base)>& write)
 {
     const std::optional<std::string> directory = environment_variable("OPENXISF_WRITTEN_UNITS_DIR");
-    if (!directory || directory->empty()) {
+    if (!directory) {
         return;
     }
     static std::mutex mutex;
@@ -87,13 +88,14 @@ void record_unit(std::span<const std::byte> file)
     });
 }
 
-void record_distributed_unit(const distributed_unit& unit)
+void record_distributed_unit(const distributed_unit& unit, std::string_view blocks_path)
 {
-    record([&unit](const std::filesystem::path& directory, const std::string& base) {
+    record([&unit, blocks_path](const std::filesystem::path& directory, const std::string& base) {
         write_file(directory / path_of(base + ".xml"), unit.header);
-        std::filesystem::create_directory(directory / path_of(base));
+        const std::filesystem::path blocks = directory / path_of(base) / path_of(std::string(blocks_path));
+        std::filesystem::create_directories(blocks.parent_path());
         write_file(directory / path_of(base) / "unit.xish", unit.header);
-        write_file(directory / path_of(base) / path_of(blocks_file_name), unit.blocks);
+        write_file(blocks, unit.blocks);
     });
 }
 
