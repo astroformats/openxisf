@@ -10,6 +10,7 @@
 #include <openxisf/error.h>
 #include <openxisf/reader.h>
 
+#include "model/ancillary_budget.h"
 #include "model/unit.h"
 #include "support/bytes.h"
 #include "support/diagnostics.h"
@@ -25,6 +26,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -535,6 +537,50 @@ TEST(data_block, the_subblocks_account_for_every_byte_of_their_block)
                                          {.compressed_size = 2, .uncompressed_size = 6}}));
 
         EXPECT_TRUE(unavailable(open_with("1,4:2,5"), "/xisf/Image[1]", errc::invalid_subblocks, element)) << element;
+    }
+}
+
+// Descriptors that no open makes, which a read still refuses, with the context of the block: an external block that
+// was never located, and subblocks that do not add up to the stored block. load_block() records the same errors, and
+// gives back the budget of the block.
+TEST(data_block, a_descriptor_that_cannot_be_read_is_refused_with_the_context_of_its_block)
+{
+    const unit opened =
+        open_internal(file_with_attachments(header_xml(row_image(3, R"(location="attachment:{0}")")), {abc()}));
+    const block_descriptor& attached = descriptor_at(opened, "/xisf/Image[1]");
+    block_descriptor unlocated = attached;
+    unlocated.location.kind = location_kind::path;
+    block_descriptor uneven = attached;
+    uneven.compression =
+        openxisf::detail::block_compression{.codec = openxisf::detail::compression_codec::zlib,
+                                            .uncompressed_size = 3,
+                                            .subblocks = {{.compressed_size = 1, .uncompressed_size = 3}}};
+    struct refused
+    {
+        block_descriptor descriptor{};
+        errc code = errc::unsupported_location;
+        std::optional<std::uint64_t> offset{};
+    };
+    for (const refused& entry :
+         {refused{.descriptor = unlocated, .code = errc::unsupported_location},
+          refused{.descriptor = uneven, .code = errc::invalid_subblocks, .offset = attached.location.position}}) {
+        const data_block block{.path = "/xisf/Image[1]", .descriptor = entry.descriptor};
+        try {
+            (void)openxisf::detail::read_block(opened.source, block, opened.limits);
+            ADD_FAILURE() << "read " << static_cast<int>(entry.code);
+        } catch (const openxisf::error& failure) {
+            EXPECT_EQ(failure.code(), entry.code);
+            EXPECT_EQ(failure.context().element, "/xisf/Image[1]");
+            EXPECT_EQ(failure.context().offset, entry.offset);
+        }
+
+        openxisf::detail::ancillary_budget budget(openxisf::detail::block_cost(entry.descriptor));
+        openxisf::detail::diagnostic_log log(false);
+        EXPECT_FALSE(
+            openxisf::detail::load_block(opened.source, entry.descriptor, opened.limits, budget, "/xisf/Image[1]", log)
+                .has_value());
+        EXPECT_TRUE(single_diagnostic(log.entries(), severity::error, entry.code, "/xisf/Image[1]"));
+        EXPECT_TRUE(budget.load(openxisf::detail::block_cost(entry.descriptor), {}, log));
     }
 }
 

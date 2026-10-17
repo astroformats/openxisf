@@ -11,9 +11,11 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -330,6 +332,27 @@ TEST(text_grammar, float128_values_are_checked_against_its_range)
     }
     EXPECT_TRUE(throws<invalid_data_error>(errc::invalid_float, [] { (void)check_float128("1."); }));
     EXPECT_EQ(check_float128("  1.5  "), "1.5");
+}
+
+TEST(text_grammar, float128_text_is_kept_as_written_but_non_finite_values)
+{
+    // Spec §8.3.3: encoders should write NaN, +Inf and -Inf, and decoders accept nan, -nan, inf and -inf too. A
+    // Float128 keeps its text, which the writer writes back: a non-finite value in the forms that encoders use, a sign
+    // of NaN dropped, and a finite one as written.
+    for (const auto& [text, kept] :
+         std::initializer_list<std::pair<std::string_view, std::string_view>>{{"NaN", "NaN"},
+                                                                              {"nan", "NaN"},
+                                                                              {" -nan ", "NaN"},
+                                                                              {"+Inf", "+Inf"},
+                                                                              {"inf", "+Inf"},
+                                                                              {"-Inf", "-Inf"},
+                                                                              {"\t-inf", "-Inf"},
+                                                                              {"+1.5", "+1.5"},
+                                                                              {"+.5", "+.5"},
+                                                                              {"1E4932", "1E4932"},
+                                                                              {"-0", "-0"}}) {
+        EXPECT_EQ(check_float128(text), kept) << text;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

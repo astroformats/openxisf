@@ -24,6 +24,7 @@ using namespace std::string_view_literals;
 using openxisf::errc;
 using openxisf::invalid_data_error;
 using openxisf::limit_error;
+using openxisf::detail::character_data;
 using openxisf::detail::element_length;
 using openxisf::detail::is_xml_white_space;
 using openxisf::detail::parse_xml;
@@ -222,6 +223,55 @@ TEST(xml_document, keeps_white_space_that_is_the_only_content_of_an_element)
     // White space between elements is dropped.
     EXPECT_EQ(a.first_child().type(), pugi::node_element);
     EXPECT_EQ(a.last_child().type(), pugi::node_element);
+}
+
+TEST(xml_document, takes_the_character_data_around_markup_from_the_text)
+{
+    // pugixml drops the white space beside a comment, a processing instruction or a CDATA section, which XML keeps:
+    // the character data of such an element come from the text as XML defines them. The expected values are those of
+    // Python's xml.etree (expat): the text of the element and the tails of its children.
+    struct sample
+    {
+        std::string_view content{};
+        std::string_view data{};
+    };
+    for (const sample& entry : {
+             sample{.content = " <!--c-->a", .data = " a"},
+             sample{.content = "a<!--c--> ", .data = "a "},
+             sample{.content = " <!--c--> ", .data = "  "},
+             sample{.content = "a<?pi x?> ", .data = "a "},
+             sample{.content = "  <![CDATA[x]]>", .data = "  x"},
+             sample{.content = "<![CDATA[ <&> ]]>", .data = " <&> "},
+             sample{.content = "a&amp;<!---->&#x41;&lt;b", .data = "a&A<b"},
+             sample{.content = "line\r\n<!---->\rend", .data = "line\n\nend"},
+             sample{.content = "<![CDATA[a\r\nb\rc]]>", .data = "a\nb\nc"},
+             sample{.content = "x<!--a-->y<!--b-->z", .data = "xyz"},
+             sample{.content = "a<b>t</b><!---->c", .data = "ac"},
+             sample{.content = " \t\n<!---->", .data = " \t\n"},
+             sample{.content = "&#9;<!---->&#10;&#13;", .data = "\t\n\r"},
+             sample{.content = "]]&gt;<?a?>", .data = "]]>"},
+             sample{.content = "<![CDATA[]]]]><![CDATA[>]]>", .data = "]]>"},
+             sample{.content = "<?pi a > b ?>x", .data = "x"},
+             sample{.content = "<!-- a - b -->x", .data = "x"},
+             sample{.content = "\xC3\xA9<!---->\xC3\xBC", .data = "\xC3\xA9\xC3\xBC"},
+             sample{.content = "<!-- <Property/> -->a", .data = "a"},
+             sample{.content = "&quot;&apos;<!---->&gt;", .data = "\"'>"},
+             sample{.content = "<!---->", .data = ""},
+             sample{.content = "&#x1F600;<?x?>", .data = "\xF0\x9F\x98\x80"},
+             // An undeclared entity, which expat refuses, stays as written, as pugixml leaves it.
+             sample{.content = "&foo;<!---->&#;", .data = "&foo;&#;"},
+         }) {
+        const std::string text = "<r><e a=\"1\">" + std::string(entry.content) + "</e><f/></r>";
+        const auto document = parse(text);
+        EXPECT_EQ(character_data(document->document_element().child("e"), text), entry.data) << entry.content;
+    }
+    // Without such markup, the character data are those that pugixml gives, whatever the text says.
+    const std::string text = "<r><e>  </e><f/><g> x&amp;y </g></r>";
+    const auto document = parse(text);
+    const pugi::xml_node root = document->document_element();
+    EXPECT_EQ(character_data(root.child("e"), text), "  ");
+    EXPECT_EQ(character_data(root.child("f"), text), "");
+    EXPECT_EQ(character_data(root.child("g"), text), " x&y ");
 }
 
 TEST(xml_document, normalizes_line_ends_and_white_space_in_attributes)

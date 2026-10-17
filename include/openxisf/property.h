@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -23,7 +24,7 @@
 
 namespace openxisf {
 
-/// An unsigned 128-bit integer: high × 2^64 + low (spec §8.1).
+/// An unsigned 128-bit integer: high * 2^64 + low (spec §8.1).
 struct uint128
 {
     std::uint64_t high = 0;
@@ -32,7 +33,7 @@ struct uint128
     friend bool operator==(const uint128&, const uint128&) = default;
 };
 
-/// A signed 128-bit integer in two's complement: high × 2^64 + low (spec §8.1).
+/// A signed 128-bit integer in two's complement: high * 2^64 + low (spec §8.1).
 struct int128
 {
     std::int64_t high = 0;
@@ -41,7 +42,7 @@ struct int128
     friend bool operator==(const int128&, const int128&) = default;
 };
 
-/// An IEEE 754 binary128 value (spec §8.1), as its bit pattern: high × 2^64 + low. OpenXISF has no quadruple-precision
+/// An IEEE 754 binary128 value (spec §8.1), as its bit pattern: high * 2^64 + low. OpenXISF has no quadruple-precision
 /// arithmetic; to_double() converts a value to the nearest double.
 struct float128
 {
@@ -206,7 +207,10 @@ struct property_format
     friend bool operator==(const property_format&, const property_format&) = default;
 };
 
-/// The C++ types of the elements of vector and matrix properties.
+/// The C++ types of the elements of vector and matrix properties. Integer elements are of the fixed-width types alone,
+/// std::int8_t to std::uint64_t, which are other C++ types on other platforms: a std::vector of long, long long or
+/// std::size_t is a vector of one of them on some platforms and of none on others. Convert such a vector to one of
+/// the fixed-width types.
 template <typename T>
 concept property_element =
     std::same_as<T, std::int8_t> || std::same_as<T, std::uint8_t> || std::same_as<T, std::int16_t> ||
@@ -228,7 +232,8 @@ concept property_element =
 /// UInt128 in int128 and uint128, Float32 and Float64 in float and double, Complex32 and Complex64 in std::complex,
 /// String in a std::string of UTF-8, TimePoint in date_time, and vectors and matrices in a std::vector of their
 /// elements, in native byte order and, for matrices, in row order. Float128 and Complex128 scalars are kept as the text
-/// of their value attribute, since OpenXISF has no quadruple-precision arithmetic; Float128 and Complex128 elements of
+/// of their value attribute, since OpenXISF has no quadruple-precision arithmetic, in a form of spec §8.3.3 that
+/// std::from_chars may refuse, such as +.5, or find beyond the range of double; Float128 and Complex128 elements of
 /// vectors and matrices are float128 and complex128 values.
 ///
 /// The constructors take the C++ type of a value and give the property type it maps to: a float makes a Float32 value,
@@ -248,6 +253,19 @@ public:
                      std::vector<complex128>>;
 
     property_value() = default;
+    property_value(const property_value& other);
+    property_value(property_value&&) noexcept = default;
+
+    /// Copies other. When the copy throws, this value is left as it was.
+    property_value& operator=(const property_value& other)
+    {
+        property_value copy(other);
+        *this = std::move(copy);
+        return *this;
+    }
+
+    property_value& operator=(property_value&&) noexcept = default;
+    ~property_value() = default;
 
     property_value(bool value) noexcept;
     property_value(std::int8_t value) noexcept;
@@ -260,7 +278,9 @@ public:
     property_value(std::uint64_t value) noexcept;
 
     /// An integer of another C++ type, such as long long where std::int64_t is long: the integer type of its width and
-    /// signedness.
+    /// signedness. The character types are not taken for integers here, but a character is promoted to an int, or a
+    /// char32_t to an unsigned int, as a wchar_t is where it is an unsigned type of 32 bits (Linux on arm64), and
+    /// makes an Int32 or a UInt32 value: set("Instrument:Filter", 'R') sets the number 82, where "R" sets a String.
     template <typename T>
         requires std::integral<T> && (!std::same_as<T, bool>) && (!std::same_as<T, char>) &&
                  (!std::same_as<T, wchar_t>) && (!std::same_as<T, char8_t>) && (!std::same_as<T, char16_t>) &&
@@ -290,7 +310,7 @@ public:
     {}
 
     /// A matrix value, with its elements in row order.
-    /// @throws usage_error when elements does not have rows × columns elements.
+    /// @throws usage_error when elements does not have rows * columns elements.
     template <property_element T>
     [[nodiscard]] static property_value matrix(std::uint64_t rows, std::uint64_t columns, std::vector<T> elements)
     {
@@ -303,12 +323,13 @@ public:
     }
 
     /// A Float128 scalar, kept as text: a floating point value of spec §8.3.3 within the range of Float128, without the
-    /// white space around it, which encoders do not write (spec §8.3.5).
+    /// white space around it, which encoders do not write (spec §8.3.5). A finite value keeps its spelling, and a
+    /// non-finite one is kept as NaN, +Inf or -Inf, the forms that encoders use (spec §8.3.3), whatever its spelling.
     /// @throws usage_error when text is not such a value.
     [[nodiscard]] static property_value from_float128_text(std::string_view text);
 
     /// A Complex128 scalar, kept as text: (real,imag), with Float128 parts, without the white space around the value
-    /// and its parts.
+    /// and its parts, each kept as from_float128_text() keeps a value.
     /// @throws usage_error when text is not such a value.
     [[nodiscard]] static property_value from_complex128_text(std::string_view text);
 
@@ -449,6 +470,8 @@ struct property
     /// "Instrument:ExposureTime" (spec §8.4.1).
     std::string id{};
     property_value value{};
+    /// How to represent the value as text; empty when there is none. A format equal to property_format{}, the
+    /// defaults of the specification, says nothing, so the writer does not write it, and it reads back empty.
     std::optional<property_format> format{};
     /// A descriptive comment; empty when there is none.
     std::string comment{};
@@ -465,6 +488,19 @@ public:
     using const_iterator = std::vector<property>::const_iterator;
 
     property_list() = default;
+    property_list(const property_list&) = default;
+    property_list(property_list&&) noexcept = default;
+
+    /// Copies other. When the copy throws, this list is left as it was.
+    property_list& operator=(const property_list& other)
+    {
+        property_list copy(other);
+        *this = std::move(copy);
+        return *this;
+    }
+
+    property_list& operator=(property_list&&) noexcept = default;
+    ~property_list() = default;
 
     /// The properties of items, in order.
     /// @throws usage_error when two of them have the same identifier.
@@ -488,7 +524,8 @@ public:
     /// Adds item at the end, or replaces the property with its identifier, which keeps its position.
     void set(property item);
 
-    /// Adds or replaces the property id with the given value, without format or comment.
+    /// Adds the property id with the given value, without format or comment, or replaces the property id, which keeps
+    /// its position but loses its format and its comment.
     void set(std::string id, property_value value);
 
     /// Removes the property with the given identifier. True when there was one.
@@ -512,7 +549,8 @@ struct table_field
     property_type type = property_type::string;
     /// The title of the column; empty when there is none.
     std::string header{};
-    /// How to represent the values of the column as text.
+    /// How to represent the values of the column as text; empty when there is none. A format equal to
+    /// property_format{} is not written, as for a property, and reads back empty.
     std::optional<property_format> format{};
 
     friend bool operator==(const table_field&, const table_field&) = default;

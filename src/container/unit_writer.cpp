@@ -250,7 +250,9 @@ public:
     }
 
 private:
-    // Builds the header and encodes the inline blocks. Returns the bytes of the attached blocks before compression.
+    // Builds the header and encodes the inline blocks. Returns the bytes of the attached blocks before compression. The
+    // subblocks are counted before anything is copied, compressed or written: the pixel data that a big-endian host
+    // swaps are copied only once the header can list them.
     std::uint64_t prepare()
     {
         tree_ = build_header_tree(unit_, options_, context_.uuids);
@@ -269,6 +271,12 @@ private:
             }
         }
         check_subblock_count(subblocks);
+        if (in_one_pass()) {
+            check_longest_subblocks();
+        }
+        for (block_source& block : tree_.blocks) {
+            to_little_endian(block);
+        }
         return total;
     }
 
@@ -278,9 +286,16 @@ private:
         return (encoding_.codec || encoding_.checksum) && !attached_.empty();
     }
 
+    // True when the unit is written in one pass, its header once its blocks are, which needs a sink of the blocks that
+    // can rewrite: the sink of a monolithic file, or the data blocks file of a distributed unit.
+    [[nodiscard]] bool in_one_pass() const
+    {
+        return encoded() && blocks_.can_rewrite();
+    }
+
     void write_monolithic(std::uint64_t total)
     {
-        if (encoded() && sink_.can_rewrite()) {
+        if (in_one_pass()) {
             const std::uint64_t room = longest_header_size();
             progress_.start(total);
             write_streamed(room);
@@ -311,7 +326,7 @@ private:
         }
         const std::uint64_t index_end = first_index_element + (attached_.size() * index_element_size);
         std::string text;
-        if (encoded() && blocks_.can_rewrite()) {
+        if (in_one_pass()) {
             (void)longest_header_size();
             progress_.start(total);
             write_zeros(blocks_, index_end);
@@ -545,7 +560,7 @@ private:
 
     // A unit written in one pass, to a sink that can rewrite, has its header written once its blocks are, so the header
     // must be able to hold them at their longest, every subblock with numbers of 20 digits: a unit whose subblocks
-    // cannot be listed so is refused before they are.
+    // cannot be listed so is refused before they are (prepare()).
     void check_longest_subblocks() const
     {
         std::uint64_t subblocks = 0;
@@ -557,12 +572,11 @@ private:
         }
     }
 
-    // The size of the longest header that the attached blocks can give, for a unit written in one pass: the header
-    // finally written is no longer. A unit whose longest header is too large is refused before any byte is written,
-    // and before the progress function is told of the save.
+    // The size of the longest header that the attached blocks can give, for a unit written in one pass, whose subblocks
+    // prepare() checked: the header finally written is no longer. A unit whose longest header is too large is refused
+    // before any byte is written, and before the progress function is told of the save.
     std::uint64_t longest_header_size()
     {
-        check_longest_subblocks();
         for (const std::size_t i : attached_) {
             headers_[i] = longest_header(tree_.blocks[i]);
         }

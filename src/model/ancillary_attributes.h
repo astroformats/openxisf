@@ -55,6 +55,11 @@ inline constexpr double luminance_tolerance = 1e-4;
 /// chromaticities give, which the stored ones may differ from. Throws with errc::invalid_rgb_working_space.
 [[nodiscard]] std::array<double, 3> check_rgb_working_space(const rgb_working_space& space);
 
+/// True when the luminance coefficients that check_rgb_working_space() derives are in [0, 1], as those that an encoder
+/// computes and writes must be (spec §8.5.4.1, §11.8.1). A white just outside the triangle of the primaries gives one
+/// below 0, which a stored 0 may still agree with within luminance_tolerance.
+[[nodiscard]] bool derived_luminance_in_range(const std::array<double, 3>& derived) noexcept;
+
 /// Checks the constraints of spec §8.5.6 on the parameters of a display function, for each component: m, s and h in
 /// [0, 1], s at most h, l at most 0 and r at least 1. Throws with errc::invalid_display_function.
 void check_display_function(const display_function& function);

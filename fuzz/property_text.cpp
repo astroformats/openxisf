@@ -9,8 +9,10 @@
 // parser accepts its text, and what it accepts formats back to text that parses to the same value, or it throws the
 // error of its grammar. Then a unit with a Property element made of the lines is opened, leniently and strictly, with
 // small limits: the two agree as in fuzz_header, and every property that the unit has is of the type that its element
-// names, and is rendered as text with its format specifier (spec §8.4.3): valid UTF-8, padded to its width within the
-// bound of the renderer, its first element the start of the whole. Any other exception escapes and fails the run.
+// names, or a TimePoint where the element names a String and the identifier is that of a reserved TimePoint property,
+// which the reader takes for the TimePoint that the String holds, and is rendered as text with its format specifier
+// (spec §8.4.3): valid UTF-8, padded to its width within the bound of the renderer, its first element the start of the
+// whole. Any other exception escapes and fails the run.
 
 #include "model/property_text.h"
 
@@ -22,6 +24,7 @@
 #include "core/utc_time.h"
 #include "core/utf8.h"
 #include "model/format_specifier.h"
+#include "model/property_catalog.h"
 #include "model/property_types.h"
 #include "model/unit.h"
 
@@ -270,13 +273,20 @@ void check_rendering(const openxisf::property& item)
     }
 }
 
+// A reserved TimePoint property written as a String that holds a TimePoint, which the reader reads as that TimePoint.
+bool is_time_point_held_as_string(const openxisf::property& item, std::optional<property_type> type)
+{
+    return type == property_type::string && item.value.type() == property_type::time_point &&
+           detail::reserved_property_type(item.id) == property_type::time_point;
+}
+
 // Every property that the unit has keeps the invariants of its type.
 void check_properties(const detail::unit& opened, const fields& input, std::optional<property_type> type)
 {
     for (const openxisf::property& item : opened.properties.standalone) {
         // The attributes of the last line can give the element its identifier or type when the other lines do not.
         require(input.lines[3].empty() || item.id == normalized(input.lines[3]));
-        require(input.lines[0].empty() || type == item.value.type());
+        require(input.lines[0].empty() || type == item.value.type() || is_time_point_held_as_string(item, type));
         const property_value& value = item.value;
         switch (detail::category_of(value.type())) {
         case detail::type_category::string:

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <new>
 #include <string>
 
@@ -185,11 +186,36 @@ void zlib_decompress(std::span<const std::byte> input, std::span<std::byte> outp
     }
 }
 
-void zlib_compress(std::span<const std::byte> input, int level, std::vector<std::byte>& output, std::size_t max_piece)
+struct zlib_encoder::state
 {
-    deflater state(level);
-    z_stream& stream = state.stream();
-    buffer<const std::byte> in(input, max_piece);
+    deflater stream;
+    // Whether the stream has compressed an input, and needs deflateReset() before the next.
+    bool used = false;
+
+    explicit state(int level) : stream(level) {}
+};
+
+zlib_encoder::zlib_encoder(int level, std::size_t max_piece)
+    : state_(std::make_unique<state>(level)), max_piece_(max_piece)
+{}
+
+zlib_encoder::~zlib_encoder() = default;
+
+void zlib_encoder::compress(std::span<const std::byte> input, std::vector<std::byte>& output)
+{
+    z_stream& stream = state_->stream.stream();
+    if (state_->used) {
+        // Keeps the level and the memory of the stream, and starts a new one.
+        const int result = deflateReset(&stream);
+        if (result != Z_OK) {
+            throw_failure(result, stream);
+        }
+    }
+    state_->used = true;
+    // A compression that threw may have left input in the stream.
+    stream.next_in = Z_NULL;
+    stream.avail_in = 0;
+    buffer<const std::byte> in(input, max_piece_);
     const std::size_t start = output.size();
     // More than deflate needs for data it cannot compress, which zlib bounds at a little more than the data
     // (deflateBound()); the output still grows if another implementation of zlib ever needs more.
@@ -203,7 +229,7 @@ void zlib_compress(std::span<const std::byte> input, int level, std::vector<std:
         }
         const std::size_t room = output.size() - start - written;
         stream.next_out = bytes_of(output.data() + start + written);
-        stream.avail_out = piece(room, max_piece);
+        stream.avail_out = piece(room, max_piece_);
         const uInt offered = stream.avail_out;
         const int flush = in.left(stream.avail_in) == stream.avail_in ? Z_FINISH : Z_NO_FLUSH;
         const int result = deflate(&stream, flush);
@@ -216,6 +242,11 @@ void zlib_compress(std::span<const std::byte> input, int level, std::vector<std:
         }
     }
     output.resize(start + written);
+}
+
+void zlib_compress(std::span<const std::byte> input, int level, std::vector<std::byte>& output, std::size_t max_piece)
+{
+    zlib_encoder(level, max_piece).compress(input, output);
 }
 
 } // namespace openxisf::detail

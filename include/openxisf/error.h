@@ -33,8 +33,10 @@ enum class errc
     value_out_of_range,      ///< A well-formed value that its declared type cannot represent.
     invalid_base64,          ///< Text is not valid Base64 data.
     invalid_hex,             ///< Text is not valid hexadecimal (Base16) data.
-    invalid_uuid,            ///< Text is not a UUID in canonical form.
-    invalid_utf16,           ///< Text is not well-formed UTF-16, or contains U+0000.
+    invalid_uuid,            ///< Text is not a UUID in canonical form, or the UUID of an image is not of version 4
+                             ///< (spec §11.5.2).
+    invalid_utf16,           ///< Reserved, and never reported: text from the system that is not well-formed UTF-16,
+                             ///< such as a path, is errc::open_failed.
     open_failed,             ///< A file could not be opened or created.
     not_a_regular_file,      ///< A path names a directory, a device or anything else that is not a regular file.
     not_seekable,            ///< A stream cannot change its position, which a source needs.
@@ -67,18 +69,22 @@ enum class errc
     checksum_mismatch,       ///< The digest of a data block differs from its checksum attribute.
     invalid_compression,     ///< A compression attribute that is not of the form of spec §10.6.
     unsupported_compression, ///< A data block compressed with a codec that OpenXISF does not implement.
-    invalid_subblocks,       ///< A subblocks attribute that is malformed, or disagrees with the sizes of its block.
+    invalid_subblocks,       ///< A subblocks attribute that is malformed, or disagrees with the sizes of its block;
+                             ///< or a compressed block, or subblock, larger than its codec can decode from its bytes.
     allocation_too_large,    ///< Data that need a single allocation larger than limits::max_allocation.
     corrupt_compressed_data, ///< Compressed data that cannot be decoded, or that do not decode to the declared size.
     zstd_window_too_large,   ///< A Zstandard frame needs a window larger than limits::max_zstd_window.
     codec_failure,           ///< A compression library failed for a reason other than the data, such as its version.
-    invalid_property,    ///< A Property element lacks an attribute, or serializes its value in a form its type forbids.
-    invalid_property_id, ///< A property identifier that is missing, or not of the form of spec §8.4.1.
-    duplicate_property_id,     ///< An object has several properties with the same identifier (spec §8.4.1).
+    invalid_property,      ///< A Property element lacks an attribute, serializes its value in a form its type forbids,
+                           ///< or has a value that its reserved identifier forbids (spec §11.5.3.5).
+    invalid_property_id,   ///< A property identifier that is missing, or not of the form of spec §8.4.1.
+    duplicate_property_id, ///< An object has several properties with the same identifier (spec §8.4.1), or the
+                           ///< standalone properties have, which is a warning.
     unsupported_property_type, ///< A property type that the specification does not define.
     invalid_property_length,   ///< The length, rows or columns of a property disagree with the size of its data block.
     invalid_complex,           ///< Text is not a complex number in the form of spec §11.1.5.
-    invalid_time_point,        ///< Text is not a TimePoint value: an ISO 8601 date and time (spec §8.4.4.4).
+    invalid_time_point,        ///< Text is not a TimePoint value: an ISO 8601 date and time (spec §8.4.4.4); or a
+                               ///< date_time to write is not a valid date and time from year 0 to 9999.
     invalid_format_specifier,  ///< Text is not a property format specifier (spec §8.4.3).
     reserved_property_type,    ///< A property with a reserved identifier has another type than the specification's;
                                ///< a String that holds a TimePoint is read as the TimePoint (an info diagnostic).
@@ -91,9 +97,11 @@ enum class errc
     pixel_data_size_mismatch,  ///< The data of an image are not the size that its geometry and sample format give.
     invalid_image_id,          ///< An image id that is not of the form of spec §11.5.2.
     duplicate_image_id,        ///< Several images of a unit have the same id.
-    invalid_reference,         ///< A Reference element names an element that cannot be associated where it is.
+    invalid_reference,         ///< A Reference element names an element that cannot be associated where it is, or
+                               ///< one that is associated there already.
     invalid_fits_keyword, ///< A FITSKeyword element lacks a name, or does not follow the rules of FITS (spec §11.6).
-    invalid_icc_profile,  ///< An ICCProfile element without a data block (spec §11.7).
+    invalid_icc_profile,  ///< An ICCProfile element without a data block (spec §11.7), or a profile that does not
+                          ///< start with the 128-byte header of an ICC profile, with its signature `acsp`.
     invalid_rgb_working_space, ///< An RGBWorkingSpace element that defines no valid RGB working space (spec §11.8).
     invalid_display_function,  ///< A DisplayFunction element whose parameters are missing or out of range (spec §11.9).
     invalid_color_filter_array, ///< A ColorFilterArray element that does not describe a CFA (spec §11.10).
@@ -117,7 +125,7 @@ enum class errc
 /// Where in a unit a problem was found. Empty or absent members are unknown or do not apply.
 struct error_context
 {
-    std::string element{};                 ///< Path of the XML element.
+    std::string element{};                 ///< Path of the XML element: /xisf/Image[1]/Property[2], by local names.
     std::string attribute{};               ///< Name of the XML attribute.
     std::optional<std::uint64_t> offset{}; ///< Byte offset in the source.
 
@@ -131,14 +139,25 @@ struct error_context
 #pragma warning(disable : 4251 4275)
 #endif
 
-/// Base class of every exception that OpenXISF throws. Copying an error never throws.
+// Each exception class declares its copies, since it declares its destructor: the implicit copies of such a class
+// are deprecated, which -Wdeprecated reports in applications. It declares no moves, so that a move copies: a
+// defaulted one would leave the error without its context.
+// NOLINTBEGIN(cppcoreguidelines-special-member-functions)
+
+/// Base class of the exceptions that OpenXISF throws for its failures. Copying an error never throws.
 ///
 /// what() returns the message followed by the context, if there is one.
+///
+/// Besides them, a function that allocates memory can throw std::bad_alloc, which a size beyond 2^63 - 1 bytes gives
+/// whatever the limits, and the exceptions of the application's own sources, sinks, resolvers and progress functions
+/// pass through unchanged.
 class OPENXISF_API error : public std::runtime_error
 {
 public:
     /// The message describes the failure without its context, which what() appends.
     error(errc code, std::string_view message, error_context context = {});
+    error(const error&) = default;
+    error& operator=(const error&) = default;
     ~error() override;
 
     /// The reason of the failure.
@@ -156,6 +175,8 @@ class OPENXISF_API io_error : public error
 {
 public:
     io_error(errc code, std::string_view message, std::error_code system_code = {}, error_context context = {});
+    io_error(const io_error&) = default;
+    io_error& operator=(const io_error&) = default;
     ~io_error() override;
 
     /// The operating-system error, when there is one.
@@ -170,6 +191,8 @@ class OPENXISF_API invalid_data_error : public error
 {
 public:
     using error::error;
+    invalid_data_error(const invalid_data_error&) = default;
+    invalid_data_error& operator=(const invalid_data_error&) = default;
     ~invalid_data_error() override;
 };
 
@@ -178,6 +201,8 @@ class OPENXISF_API integrity_error : public error
 {
 public:
     using error::error;
+    integrity_error(const integrity_error&) = default;
+    integrity_error& operator=(const integrity_error&) = default;
     ~integrity_error() override;
 };
 
@@ -186,6 +211,8 @@ class OPENXISF_API unsupported_error : public error
 {
 public:
     using error::error;
+    unsupported_error(const unsupported_error&) = default;
+    unsupported_error& operator=(const unsupported_error&) = default;
     ~unsupported_error() override;
 };
 
@@ -194,6 +221,8 @@ class OPENXISF_API limit_error : public error
 {
 public:
     using error::error;
+    limit_error(const limit_error&) = default;
+    limit_error& operator=(const limit_error&) = default;
     ~limit_error() override;
 };
 
@@ -203,6 +232,8 @@ class OPENXISF_API validation_error : public error
 {
 public:
     using error::error;
+    validation_error(const validation_error&) = default;
+    validation_error& operator=(const validation_error&) = default;
     ~validation_error() override;
 };
 
@@ -211,16 +242,24 @@ class OPENXISF_API usage_error : public error
 {
 public:
     using error::error;
+    usage_error(const usage_error&) = default;
+    usage_error& operator=(const usage_error&) = default;
     ~usage_error() override;
 };
 
-/// A progress callback asked to stop. The operation left no partial output.
+/// A progress callback asked to stop. A save to a path leaves the files as they were (writer::save()); a save to a
+/// sink leaves there what it wrote, without calling its finish(), and a read into memory of the caller may leave part
+/// of the data there.
 class OPENXISF_API cancelled_error : public error
 {
 public:
     using error::error;
+    cancelled_error(const cancelled_error&) = default;
+    cancelled_error& operator=(const cancelled_error&) = default;
     ~cancelled_error() override;
 };
+
+// NOLINTEND(cppcoreguidelines-special-member-functions)
 
 #if defined(_MSC_VER)
 #pragma warning(pop)

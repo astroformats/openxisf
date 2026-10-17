@@ -23,8 +23,11 @@
 
 namespace openxisf {
 
-/// Version of the linked library as "major.minor.patch". Compare it with OPENXISF_VERSION_STRING to
-/// detect a header that does not belong to the library in use.
+/// Version of the linked library as "major.minor.patch". The ABI holds within a minor version, so a program runs with
+/// the shared library of the patch version it was built against or of a later one of the same minor version, which
+/// may export functions that an earlier one lacks: compare the major and minor numbers of this version with
+/// OPENXISF_VERSION_MAJOR and OPENXISF_VERSION_MINOR, not the whole string, to detect a header that does not belong
+/// to the library in use.
 [[nodiscard]] OPENXISF_API std::string_view version() noexcept;
 
 } // namespace openxisf

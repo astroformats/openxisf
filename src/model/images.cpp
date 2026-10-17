@@ -128,6 +128,17 @@ public:
         ids_.insert(id);
     }
 
+    /// Records that the element at by associates the Table element at target with the object, and returns the element
+    /// that associated it before, when one did: a table contained and named, or named twice, is one table of it.
+    std::optional<std::size_t> associate_table(std::size_t target, std::size_t by)
+    {
+        const auto [earlier, added] = tables_.try_emplace(target, by);
+        if (added) {
+            return std::nullopt;
+        }
+        return earlier->second;
+    }
+
 private:
     void gather()
     {
@@ -144,6 +155,7 @@ private:
     const property_list& properties_;
     const std::vector<std::string>& deferred_;
     std::unordered_set<std::string> ids_{};
+    std::unordered_map<std::size_t, std::size_t> tables_{};
     bool gathered_ = false;
 };
 
@@ -375,6 +387,15 @@ private:
         const std::string what = "the " + std::string(element_name(kind_of(target))) + " " + outline_.path(target);
         const element_kind kind = kind_of(target);
         if (kind == element_kind::table) {
+            if (const std::optional<std::size_t> earlier = ids.associate_table(target, by)) {
+                log_.warning(errc::invalid_reference,
+                             "the Reference names " + what +
+                                 ", which is already associated with the object: it is the same table, associated "
+                                 "once",
+                             {.element = outline_.path(by == target ? *earlier : by), .attribute = "ref"});
+                tables_.release(target);
+                return;
+            }
             if (std::optional<table> item = take_table(target, ids, "the object", what, context)) {
                 info.tables.push_back(std::move(*item));
             }
@@ -411,9 +432,10 @@ private:
     }
 
     // The table of the Table element at target for an object with the identifiers ids, which gets its identifier, owner
-    // in messages. Nothing when the table cannot be read, has the identifier of another property of the object, which
-    // is an error and costs no copy, or is a copy beyond the budget; and nothing for a table that a cell leaves in its
-    // data block, whose identifier holds its place.
+    // in messages, or for the standalone properties when owner is empty. Nothing when the table cannot be read, has the
+    // identifier of another property of the object, which is an error and costs no copy, or of another standalone
+    // property, which is a warning, since standalone properties belong to no object (spec §8.4), or is a copy beyond
+    // the budget; and nothing for a table that a cell leaves in its data block, whose identifier holds its place.
     std::optional<table> take_table(std::size_t target, object_ids& ids, std::string_view owner,
                                     const std::string& what, const error_context& context)
     {
@@ -424,10 +446,19 @@ private:
         }
         const std::string& id = found != nullptr ? found->id : deferred->second;
         if (ids.contains(id)) {
-            log_.error(errc::duplicate_property_id,
-                       "another property of " + std::string(owner) + " has the identifier " + quote(id) + ", so " +
-                           what + " is ignored",
-                       {.element = context.element, .attribute = context.attribute.empty() ? "id" : "ref"});
+            const error_context at{.element = context.element, .attribute = context.attribute.empty() ? "id" : "ref"};
+            if (owner.empty()) {
+                log_.warning(errc::duplicate_property_id,
+                             "another standalone property has the identifier " + quote(id) +
+                                 ", so only the first is listed with them; a Reference to " + what +
+                                 " still associates it",
+                             at);
+            } else {
+                log_.error(errc::duplicate_property_id,
+                           "another property of " + std::string(owner) + " has the identifier " + quote(id) + ", so " +
+                               what + " is not associated with it",
+                           at);
+            }
             tables_.release(target);
             return std::nullopt;
         }
@@ -593,7 +624,8 @@ private:
         return result;
     }
 
-    // The Table elements of the root element are standalone properties (spec §11.3), each identifier once among them.
+    // The Table elements of the root element are standalone properties (spec §11.3), each identifier listed once among
+    // them.
     std::vector<table> standalone_tables()
     {
         std::vector<table> result;
@@ -603,8 +635,7 @@ private:
                 return;
             }
             const std::string what = "the table " + outline_.path(index);
-            if (std::optional<table> item =
-                    take_table(index, ids, "the root element", what, {.element = outline_.path(index)})) {
+            if (std::optional<table> item = take_table(index, ids, {}, what, {.element = outline_.path(index)})) {
                 result.push_back(std::move(*item));
             }
         });

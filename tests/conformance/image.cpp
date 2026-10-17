@@ -12,6 +12,7 @@
 #include "codec/compression.h"
 #include "support/bytes.h"
 #include "support/diagnostics.h"
+#include "support/faulty_io.h"
 #include "support/fixture_builder.h"
 #include "support/throws.h"
 
@@ -23,7 +24,6 @@
 #include <optional>
 #include <ostream>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -498,12 +498,13 @@ TEST(conformance_image, compressed_pixel_data_are_decompressed)
 
 TEST(conformance_image, a_typed_read_checks_the_allocation_limit_before_it_allocates)
 {
-    // A compressed block can declare any uncompressed size; nothing of that size is allocated beyond the limit.
+    // A compressed block can declare up to 1032 times its stored bytes with zlib; nothing of that size is allocated
+    // beyond the limit.
     const openxisf::read_options options{.limits = {.max_allocation = 1000}};
     const reader file =
         open_attached(R"(<Image geometry="1000000:1:1" sampleFormat="UInt8" compression="zlib:1000000" )"
                       R"(location="attachment:{0}"/>)",
-                      {bytes("tiny")}, options);
+                      {openxisf::test::pattern(1000)}, options);
     EXPECT_TRUE(no_diagnostics(file.diagnostics()));
     // The typed read refuses before it reads anything, which the progress function would see.
     int calls = 0;
@@ -591,9 +592,9 @@ TEST(conformance_image, the_exceptions_of_a_progress_function_pass_through)
 {
     const reader file = open_body(pair_image());
     const openxisf::progress_function failing = [](std::uint64_t, std::uint64_t) -> bool {
-        throw std::runtime_error("from the application");
+        throw openxisf::test::injected_fault();
     };
-    EXPECT_THROW((void)file.read_pixels(0, {.progress = failing}), std::runtime_error);
+    EXPECT_THROW((void)file.read_pixels(0, {.progress = failing}), openxisf::test::injected_fault);
 }
 
 } // namespace

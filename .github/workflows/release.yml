@@ -23,8 +23,9 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           project=$(sed -n 's/^    VERSION \([0-9][0-9.]*\)$/\1/p' CMakeLists.txt)
           port=$(jq -r .version packaging/vcpkg/vcpkg.json)
-          echo "tag: $tag, CMakeLists.txt: $project, vcpkg port: $port"
-          test "$tag" = "$project" && test "$tag" = "$port"
+          status=$(sed -n 's/^\*\*Status: \([0-9][0-9.]*\)\.\*\*.*$/\1/p' README.md)
+          echo "tag: $tag, CMakeLists.txt: $project, vcpkg port: $port, README status: $status"
+          test "$tag" = "$project" && test "$tag" = "$port" && test "$tag" = "$status"
 
   # Everything that runs on a pull request, with a longer fuzz run: the full platform matrix in a public
   # repository, and the Linux jobs in a private one, whose Windows and macOS jobs run by hand (ci.yml).

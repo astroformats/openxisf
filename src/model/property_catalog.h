@@ -29,6 +29,15 @@ namespace openxisf::detail {
 /// True when id is in the namespace of the metadata properties, XISF: (spec §11.4).
 [[nodiscard]] bool is_metadata_id(std::string_view id) noexcept;
 
+/// What a value of the Image namespace breaks of spec §11.5.3.5, which forbids an Image:FrameNumber below one and an
+/// Image:GroupId or Image:SubgroupId outside [_a-zA-Z0-9][_a-zA-Z0-9-.]*: a message that says so, or nothing for a
+/// valid value, another property, or a value of another type than the reserved one, which is a problem of its own.
+[[nodiscard]] std::optional<std::string> forbidden_image_value(const property& item);
+
+/// The rule of spec §11.5.3.5 that an Image:SubgroupId needs an Image:GroupId, as a message.
+inline constexpr std::string_view subgroup_without_group =
+    "an Image:SubgroupId must not be specified without an Image:GroupId (spec §11.5.3.5)";
+
 /// True when id is in the namespace of astrometric solutions, AstrometricSolution: (spec §11.5.3.7).
 [[nodiscard]] bool is_astrometric_solution_id(std::string_view id) noexcept;
 

@@ -3,6 +3,8 @@
 
 #include "support/links.h"
 
+#include "support/temp_directory.h"
+
 #if defined(_WIN32)
 // clang-format off: the I/O control codes of winioctl.h need the types of windows.h.
 #include <windows.h>
@@ -20,6 +22,22 @@
 
 namespace openxisf::test {
 
+namespace {
+
+#if defined(_WIN32)
+// Windows refuses a symbolic link to a process without the privilege or developer mode: ERROR_PRIVILEGE_NOT_HELD with
+// the standard library of MSVC, EPERM with libc++, which maps the errors of Windows to those of POSIX, and libstdc++
+// creates none on Windows (ENOSYS, and ENOTSUP with the libstdc++ of GCC 11).
+bool refused_by_windows(const std::error_code& error)
+{
+    return (error.category() == std::system_category() && error.value() == ERROR_PRIVILEGE_NOT_HELD) ||
+           error == std::errc::operation_not_permitted || error == std::errc::function_not_supported ||
+           error == std::errc::not_supported;
+}
+#endif
+
+} // namespace
+
 bool create_symbolic_link(const std::filesystem::path& target, const std::filesystem::path& link)
 {
     std::error_code error;
@@ -28,12 +46,15 @@ bool create_symbolic_link(const std::filesystem::path& target, const std::filesy
     } else {
         std::filesystem::create_symlink(target, link, error);
     }
-#if !defined(_WIN32)
-    if (error) {
-        throw std::system_error(error, "cannot create the symbolic link " + link.string());
+    if (!error) {
+        return true;
+    }
+#if defined(_WIN32)
+    if (refused_by_windows(error)) {
+        return false;
     }
 #endif
-    return !error;
+    throw std::system_error(error, "cannot create the symbolic link " + utf8(link));
 }
 
 #if defined(_WIN32)

@@ -14,8 +14,17 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <string>
 #include <system_error>
 #include <vector>
+
+#if defined(_WIN32)
+// shellapi.h needs the declarations of windows.h before it, so the two keep this order.
+// clang-format off
+#include <windows.h>
+#include <shellapi.h>
+// clang-format on
+#endif
 
 // The name is fixed by libFuzzer.
 // NOLINTNEXTLINE(readability-identifier-naming)
@@ -23,11 +32,37 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 
 namespace {
 
+// The arguments after the name of the program. On Windows, main() receives them in the ANSI code page, which cannot
+// represent every character of a path, so they are taken from CommandLineToArgvW() in UTF-16.
+std::vector<std::filesystem::path> arguments([[maybe_unused]] int argc, [[maybe_unused]] char** argv)
+{
+#if defined(_WIN32)
+    int count = 0;
+    wchar_t** wide = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (wide == nullptr) {
+        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                "cannot read the command line");
+    }
+    std::vector<std::filesystem::path> result;
+    try {
+        for (int i = 1; i < count; ++i) {
+            result.emplace_back(wide[i]);
+        }
+    } catch (...) {
+        LocalFree(static_cast<HLOCAL>(wide));
+        throw;
+    }
+    LocalFree(static_cast<HLOCAL>(wide));
+    return result;
+#else
+    return {argv + 1, argv + argc};
+#endif
+}
+
 std::vector<std::filesystem::path> list_inputs(int argc, char** argv)
 {
     std::vector<std::filesystem::path> inputs;
-    for (int i = 1; i < argc; ++i) {
-        const std::filesystem::path argument(argv[i]);
+    for (const std::filesystem::path& argument : arguments(argc, argv)) {
         if (std::filesystem::is_directory(argument)) {
             for (const auto& entry : std::filesystem::directory_iterator(argument)) {
                 if (entry.is_regular_file()) {
@@ -70,8 +105,11 @@ int main(int argc, char** argv)
         }
         for (const std::filesystem::path& input : inputs) {
             const std::vector<std::uint8_t> data = read_file(input);
-            // Printed before the run, so that the input of a crash is the last one named.
-            std::cout << input.filename().string() << '\n';
+            // Printed before the run, so that the input of a crash is the last one named; in UTF-8, which any name
+            // has, where the narrow string of a path on Windows is in the ANSI code page.
+            const std::u8string name = input.filename().u8string();
+            std::cout.write(reinterpret_cast<const char*>(name.data()), static_cast<std::streamsize>(name.size()));
+            std::cout << '\n';
             std::cout.flush();
             (void)LLVMFuzzerTestOneInput(data.data(), data.size());
         }

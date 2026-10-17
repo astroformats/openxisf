@@ -51,8 +51,9 @@ private:
 [[nodiscard]] std::uint64_t block_cost(const block_descriptor& descriptor) noexcept;
 
 /// The data of an available block, decompressed, loaded within the budget, which counts its block_cost(). Nothing when
-/// it cannot be read, which is an error in log about the element at path, and costs nothing then. What the source
-/// throws passes through.
+/// it cannot be read, which is an error in log about the element at path, and costs nothing then: an io_error of the
+/// source of an external block is such an error, with its class and system error for a strict log. What the unit's
+/// own source throws passes through.
 [[nodiscard]] std::optional<std::vector<std::byte>> load_block(const thread_safe_source& source,
                                                                const block_descriptor& descriptor, const limits& limits,
                                                                ancillary_budget& budget, const std::string& path,

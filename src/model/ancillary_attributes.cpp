@@ -148,6 +148,11 @@ std::array<double, 3> check_rgb_working_space(const rgb_working_space& space)
     return *derived;
 }
 
+bool derived_luminance_in_range(const std::array<double, 3>& derived) noexcept
+{
+    return std::ranges::all_of(derived, in_unit_range);
+}
+
 void check_display_function(const display_function& function)
 {
     for (std::size_t i = 0; i < 4; ++i) {

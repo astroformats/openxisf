@@ -32,9 +32,14 @@ namespace openxisf::detail {
 /// when it has none. A subblock whose compressed and uncompressed sizes are equal holds its data as they are, not
 /// compressed: the specification does not say so, but PixInsight writes such subblocks when they do not compress.
 /// Throws invalid_data_error with errc::invalid_subblocks when the sizes do not add up to the stored and the
-/// uncompressed size of the block, or when a compressed subblock is larger than the decoder of the codec takes (LZ4
-/// decodes at most 2^31 - 1 bytes, compressed or not).
+/// uncompressed size of the block, when a compressed subblock is larger than the decoder of the codec takes (LZ4
+/// decodes at most 2^31 - 1 bytes, compressed or not), or when it declares more bytes than the codec can decode from
+/// its compressed size: 1032 for each byte with zlib, 255 with LZ4 and LZ4HC, and 32768 with Zstandard. So a few
+/// stored bytes cannot make a read allocate more than that.
 [[nodiscard]] std::vector<subblock> subblocks_of(const block_compression& compression, std::uint64_t stored_size);
+
+/// Checks the subblocks of a compressed block as subblocks_of() does, without a copy of them.
+void check_subblocks(const block_compression& compression, std::uint64_t stored_size);
 
 /// Called after each subblock is decompressed with the uncompressed bytes done so far, on the calling thread. It may
 /// throw to stop the decompression; the exception passes through.
@@ -45,7 +50,8 @@ using subblock_progress = std::function<void(std::uint64_t done)>;
 /// as many as the threads of the task arena of the calling thread, and the progress of a batch follows it. Throws what
 /// subblocks_of() throws; limit_error with errc::allocation_too_large when the uncompressed size is above
 /// limits.max_allocation, or with errc::zstd_window_too_large; integrity_error with errc::corrupt_compressed_data when
-/// a subblock does not decode to its uncompressed size; and what the codec adapters throw for other failures.
+/// a subblock does not decode to its uncompressed size, which for a Zstandard frame that declares another size, or is
+/// not a single frame, is found before the data are allocated; and what the codec adapters throw for other failures.
 [[nodiscard]] std::vector<std::byte> decompress_block(std::span<const std::byte> stored,
                                                       const block_compression& compression, const limits& limits,
                                                       const subblock_progress& progress = {});
@@ -91,12 +97,13 @@ using subblock_store = std::function<void(std::span<const std::byte> stored, con
 /// subblock_size() bytes (the last one shorter), and each subblock is shuffled from data, compressed and given to
 /// store, in order, on the calling thread. Only the subblocks in the making are held: one at a time without oneTBB, and
 /// with it a batch of as many as the threads of the task arena, compressed in parallel, of about 1 GiB of data at most,
-/// which takes up to about twice that with the shuffled copies and the output of the codec, besides the state of the
-/// codec on each thread, which at the highest Zstandard levels is many times a subblock of a few MiB. A subblock
-/// that does not get smaller is stored as it is, with equal sizes (see subblocks_of()), as PixInsight stores it:
-/// PixInsight takes any subblock that is not smaller than its data for data stored as they are, so it would misread
-/// codec output that is. Returns how the block is compressed, with every subblock listed, even a single one. Throws
-/// usage_error with errc::invalid_argument for an invalid level, what the codec adapters throw, and what store throws.
+/// which takes up to about twice that with the shuffled copies and the output of the codec, besides a state of the
+/// codec for each subblock of a batch, which at the highest Zstandard levels is many times a subblock of a few MiB.
+/// Each state is made once for the block and kept from one batch to the next. A subblock that does not get smaller is
+/// stored as it is, with equal sizes (see subblocks_of()), as PixInsight stores it: PixInsight takes any subblock that
+/// is not smaller than its data for data stored as they are, so it would misread codec output that is. Returns how the
+/// block is compressed, with every subblock listed, even a single one. Throws usage_error with errc::invalid_argument
+/// for an invalid level, what the codec adapters throw, and what store throws.
 block_compression compress_subblocks(std::span<const std::byte> data, const compression_options& options,
                                      const subblock_store& store);
 

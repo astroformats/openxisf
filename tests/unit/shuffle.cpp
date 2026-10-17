@@ -29,10 +29,11 @@ using openxisf::test::bytes;
 using openxisf::test::pattern;
 using openxisf::test::throws;
 
-std::vector<std::byte> shuffled(const std::vector<std::byte>& input, std::size_t item_size)
+std::vector<std::byte> shuffled(const std::vector<std::byte>& input, std::size_t item_size,
+                                shuffle_kernel kernel = shuffle_kernel::simd)
 {
     std::vector<std::byte> output(input.size());
-    shuffle_bytes(input, output, item_size);
+    shuffle_bytes(input, output, item_size, kernel);
     return output;
 }
 
@@ -130,14 +131,15 @@ INSTANTIATE_TEST_SUITE_P(sizes, shuffle_layout, testing::ValuesIn(shuffle_cases(
 
 TEST(shuffle, a_part_of_the_shuffled_block_is_that_part_of_the_whole)
 {
-    // Every window of a block of 37 bytes, so that parts start and end inside runs, across runs and in the tail.
+    // Every window of a block of 37 bytes, so that parts start and end inside runs, across runs and in the tail, with
+    // the scalar code; the SIMD kernels are compared with it below.
     const std::vector<std::byte> input = pattern(37);
     for (const std::size_t item_size : {0U, 1U, 2U, 3U, 4U, 8U, 16U, 37U, 38U}) {
-        const std::vector<std::byte> whole = shuffled(input, item_size);
+        const std::vector<std::byte> whole = shuffled(input, item_size, shuffle_kernel::scalar);
         for (std::size_t offset = 0; offset <= input.size(); ++offset) {
             for (std::size_t length = 0; offset + length <= input.size(); ++length) {
                 std::vector<std::byte> part(length);
-                openxisf::detail::shuffle_part(input, item_size, offset, part);
+                openxisf::detail::shuffle_part(input, item_size, offset, part, shuffle_kernel::scalar);
                 ASSERT_TRUE(std::equal(part.begin(), part.end(), whole.begin() + static_cast<std::ptrdiff_t>(offset)))
                     << "items of " << item_size << ", " << length << " bytes at " << offset;
             }
@@ -186,7 +188,7 @@ TEST(shuffle, the_simd_kernels_give_every_part_of_the_scalar_code)
     // Every window of a block of 40 items and a tail, so that parts start and end inside the 16 items of a kernel.
     for (const std::size_t item_size : {2U, 4U, 8U}) {
         const std::vector<std::byte> input = pattern((40 * item_size) + item_size - 1);
-        const std::vector<std::byte> whole = shuffled(input, item_size);
+        const std::vector<std::byte> whole = shuffled(input, item_size, shuffle_kernel::scalar);
         for (std::size_t offset = 0; offset <= input.size(); ++offset) {
             for (std::size_t length = 0; offset + length <= input.size(); ++length) {
                 std::vector<std::byte> part(length);

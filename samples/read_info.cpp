@@ -50,7 +50,15 @@ std::string describe(const openxisf::property& item)
     const openxisf::property_value& value = item.value;
     if (value.type() == openxisf::property_type::string) {
         const std::string text = openxisf::format_value(value, format);
-        return '"' + (text.size() <= 60 ? text : text.substr(0, 57) + "...") + '"';
+        if (text.size() <= 60) {
+            return '"' + text + '"';
+        }
+        // The text is UTF-8: the cut goes back to the first byte of a character, before its continuation bytes.
+        std::size_t end = 57;
+        while ((static_cast<unsigned char>(text[end]) & 0xC0U) == 0x80U) {
+            --end;
+        }
+        return '"' + text.substr(0, end) + "...\"";
     }
     if (value.length() > 6) {
         std::string text;

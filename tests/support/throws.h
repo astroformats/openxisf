@@ -13,7 +13,8 @@
 namespace openxisf::test {
 
 /// Success when function throws Error with the given code. Use it as EXPECT_TRUE(throws<Error>(code, function)).
-template <typename Error, typename Function> testing::AssertionResult throws(errc code, Function&& function)
+template <typename Error, typename Function>
+[[nodiscard]] testing::AssertionResult throws(errc code, Function&& function)
 {
     try {
         std::forward<Function>(function)();

@@ -5,11 +5,13 @@ PixInsight. It is written from the published specification and aims at full conf
 [XISF 1.0, Revision 1](https://pixinsight.com/doc/docs/XISF-1.0-spec/XISF-1.0-spec.html), with an API that does not
 depend on any application.
 
-**Status: 1.0.0.** It reads and writes monolithic and distributed units, implements the algorithms that the
+**Status: 1.0.1.** It reads and writes monolithic and distributed units, implements the algorithms that the
 specification defines, evaluates astrometric solutions, and reads signed units, whose signatures it returns without
 verifying them. The API is stable: from 1.0 on, only a new major version may break it. The ABI holds within a minor
 version: the shared library of each minor version has a soname of its own (`libopenxisf.so.1.0` for 1.0.x), so a
-program built against 1.0 is rebuilt to use 1.1.
+program built against 1.0 is rebuilt to use 1.1. The Windows DLL has one name in every version (`openxisf.dll`,
+`libopenxisf.dll` with MinGW), so nothing keeps a program built against 1.0 from loading the DLL of 1.1 that it
+finds first: ship the DLL with the program.
 
 - **Reading.** `openxisf::reader` checks the header of a unit (the file structure, the XML, the root element, the
   elements of the specification and the references between them) and its data blocks (where each one is, how it is
@@ -25,16 +27,17 @@ program built against 1.0 is rebuilt to use 1.1.
   each data blocks file is checked.
 - **Tolerance.** A problem confined to one object makes that object unavailable, with a diagnostic, and the rest of the
   unit is read. Departures from the specification that are unambiguous and harmless are read with a warning, such as
-  uppercase hexadecimal digits, codec and checksum algorithm names in another case, or control characters that XML 1.0
-  does not allow; what affects safety or the meaning of the data is refused. A compressed block or subblock whose
-  compressed and uncompressed sizes are equal is read as stored, as PixInsight writes and reads such subblocks.
+  uppercase hexadecimal digits, codec and checksum algorithm names in another case, FITS keyword names padded with
+  spaces, which are read without them, or control characters that XML 1.0 does not allow; what affects safety or the
+  meaning of the data is refused. A compressed block or subblock whose compressed and uncompressed sizes are equal is
+  read as stored, as PixInsight writes and reads such subblocks.
 - **Writing.** `openxisf::writer` writes the same model back: it checks a whole unit against the specification before
-  it writes a byte of it, and writes its metadata, images, properties and tables, with every block uncompressed and
-  without checksums unless asked otherwise, so that every XISF 1.0 decoder reads the result. On request it compresses
-  blocks with zlib, LZ4, LZ4HC or Zstandard, with byte shuffling and subblocks, adds checksums and generates UUIDs. It
-  writes a monolithic file, or a distributed unit: a header file and a data blocks file next to it. Files are replaced
-  only once they are complete. What several images share is written for each of them, without `uid` attributes or
-  `Reference` elements.
+  it writes a byte of it (an astrometric solution only for the types of its properties), and writes its metadata,
+  images, properties and tables, with every block uncompressed and without checksums unless asked otherwise, so that
+  every XISF 1.0 decoder reads the result. On request it compresses blocks with zlib, LZ4, LZ4HC or Zstandard, with
+  byte shuffling and subblocks, adds checksums and generates UUIDs. It writes a monolithic file, or a distributed unit:
+  a header file and a data blocks file next to it. Files are replaced only once they are complete. What several images
+  share is written for each of them, without `uid` attributes or `Reference` elements.
 - **Signed units.** A unit whose header has an XML signature after its root element is read like any other, and its
   signature is not verified: the reader returns it and the root element that it covers, exactly as written, for the XML
   signature tooling of the application. A signature that is malformed or does not name the root element does not
@@ -126,12 +129,15 @@ and the suites of `tests/` that cover it. Every row has passing tests.
 
 - C++20 and CMake 3.25 or newer. 64-bit targets only (x86-64 and arm64); configuring for a 32-bit toolchain stops with
   an error.
-- Compilers, each tested by CI at the oldest version given: MSVC from Visual Studio 2022, and clang-cl; on Linux,
-  GCC 11, and Clang 15 with libstdc++ or Clang 18 with libc++; the current GCC and Clang of MSYS2; AppleClang from
-  Xcode 16, with a macOS deployment target of 13.3 or later.
-- Platforms: Windows (MSVC, clang-cl, MSYS2 UCRT64 and CLANG64), Linux (GCC and Clang, with libstdc++ or libc++) and macOS.
-- Dependencies: pugixml, zlib, LZ4 and Zstandard. oneTBB and OpenSSL are optional. GoogleTest is needed for the tests,
-  and Google Benchmark for the benchmarks.
+- Compilers, each tested by CI at the oldest version given: MSVC from Visual Studio 2022, and clang-cl from Visual
+  Studio 2026; on Linux, GCC 11, and Clang 15 with libstdc++ or Clang 18 with libc++; the current GCC and Clang of
+  MSYS2; AppleClang from Xcode 16, with a macOS deployment target of 13.3 or later.
+- Platforms: Windows (MSVC, clang-cl, MSYS2 UCRT64 and CLANG64), Linux (GCC and Clang, with libstdc++ or libc++) and
+  macOS.
+- Dependencies: pugixml 1.11 or newer, for its `pugixml::pugixml` target, zlib, LZ4 and Zstandard; CI also builds with
+  the oldest versions of Ubuntu 22.04: pugixml 1.12.1, zlib 1.2.11, LZ4 1.9.3, Zstandard 1.4.8 and GoogleTest 1.11.
+  oneTBB and OpenSSL are optional. GoogleTest is needed for the tests, and Google Benchmark 1.8 or newer for the
+  benchmarks.
 
 ## Building
 
@@ -145,7 +151,16 @@ cmake --build --preset linux-gcc-release
 ctest --preset linux-gcc-release
 ```
 
-Binaries go to `out/build/<preset>`. Personal settings belong in a `CMakeUserPresets.json`, which git ignores.
+Binaries go to `out/build/<preset>`. Personal settings belong in a `CMakeUserPresets.json`, which git ignores. The test
+presets fail a test that runs for more than 15 minutes, and a fuzzing run ten minutes past its length: some tests open
+headers as large as the default limits allow, in a second or so, which a cost that grows faster than the header would
+make take hours.
+
+The tests are two programs: `openxisf_tests`, and `openxisf_allocation_tests`, the few that count the memory that code
+asks for, or make its allocations fail, through an `operator new` of their own, which would take from the whole suite
+the checks of a sanitizer's allocator. The `package` tests install the library into an empty staging prefix, then
+configure, build and run a consumer against it, in the configuration of the run with a multi-configuration generator
+(`ctest -C Debug`), and check the versions that the package accepts.
 
 Other presets run the tests under analysis tools: `linux-gcc-asan`, `linux-clang-asan` and `msvc-asan` (AddressSanitizer;
 the Linux ones add UndefinedBehaviorSanitizer), `linux-clang-tsan` (ThreadSanitizer), `linux-clang-tsan-tbb`
@@ -155,7 +170,8 @@ seeds in `fuzz/seeds`. The other presets run those seeds once, as a regression t
 
 `-DOPENXISF_BUILD_BENCHMARKS=ON` builds `openxisf_benchmarks`, which measures the codecs, byte shuffling, the
 checksums, the conversion between storage models, the opening of a large header, and the reading and writing of a
-100 MiB frame. Run it from a release build; its test only checks that every benchmark runs.
+100 MiB frame. Run it from a release build; its test runs every benchmark but those of the frame once, only to check
+that they work.
 
 ### Dependencies
 
@@ -193,10 +209,11 @@ The Visual Studio presets use Ninja, which needs the compiler environment: run t
 | `OPENXISF_WITH_OPENSSL` | `OFF` | Compute checksums with OpenSSL (libcrypto), several times faster than the built-in code |
 | `OPENXISF_WARNINGS_AS_ERRORS` | `OFF` | Treat compiler warnings as errors (CI turns it on) |
 | `OPENXISF_HARDENING` | `OFF` | Compile with hardening flags (the presets turn it on) |
-| `OPENXISF_SANITIZE` | empty | Sanitizers for the library and the tests: `address;undefined`, `thread` or `fuzzer;address;undefined` (Clang) |
+| `OPENXISF_SANITIZE` | empty | Sanitizers for the library and the tests: `address;undefined`, `thread` or `fuzzer;address;undefined` (Clang), or `address` (MSVC) |
 
 Optional dependencies are never detected on their own. Everything except the library is off when OpenXISF is added
-with `add_subdirectory` or `FetchContent`.
+with `add_subdirectory` or `FetchContent`. The programs, and the DLL of a shared build, go to `bin` of the build
+directory, unless `CMAKE_RUNTIME_OUTPUT_DIRECTORY` says otherwise, as the project that adds OpenXISF may.
 
 ## Using it from CMake
 
@@ -210,6 +227,11 @@ it then names the prefix of the configuration, which `cmake --install --prefix` 
 build has a `d` at the end of its name, so that Debug and Release builds can be installed into one prefix. A pkg-config
 file, `openxisf.pc`, is installed as well, for the configuration installed last. OpenXISF is also set up to become a
 vcpkg port.
+
+The installed headers record whether the library is static or shared (`openxisf/linkage.h`), so a build system that
+is given only the include and library directories, as a Visual Studio project or a makefile is, needs no definition to
+link it; a static library also needs the libraries of its dependencies, which the CMake package and
+`pkg-config --static` list. A prefix holds one of the two.
 
 ## Examples
 
@@ -294,12 +316,15 @@ that crops, resamples or otherwise changes the geometry of an image removes them
 `openxisf::remove_astrometric_solution()`, as the specification requires.
 
 A unit is written with `openxisf::writer`, from the same model that the reader returns, so that a unit read can be
-written again. This excerpt of `samples/write_image.cpp` writes an image with properties, FITS keywords and a
-thumbnail, compressed with Zstandard and byte shuffling, with SHA-256 checksums; without these options the writer
-compresses nothing and adds no checksums, which every XISF 1.0 decoder reads, and Zstandard needs a decoder of
-Revision 1 of the specification:
+written again; a unit read with `header_only` lacks its ancillary data, which the writer would lose, until
+`load_ancillary_data()` loads them. This excerpt of `samples/write_image.cpp` writes an image with properties, FITS
+keywords and a thumbnail, compressed with Zstandard and byte shuffling, with SHA-256 checksums; without these options
+the writer compresses nothing and adds no checksums, which every XISF 1.0 decoder reads, and Zstandard needs a decoder
+of Revision 1 of the specification:
 
 ```cpp
+const std::vector<float> samples = render_sky();
+
 openxisf::image_info info;
 info.geometry = {.dimensions = {width, height}, .channels = 3};
 info.sample_format = openxisf::sample_format::float32;
@@ -318,8 +343,11 @@ output.save(path);
 ```
 
 The writer checks the whole unit before it writes anything, and throws `openxisf::validation_error`, which names the
-element at fault, for anything that the specification forbids. The pixel data are borrowed until `save()`, which can
-also write to any `openxisf::output_sink`.
+element at fault, for anything that the specification forbids, but in an astrometric solution, whose properties it
+checks only for their types and keeps as given. The pixel data are borrowed until the last `save()`, which can also
+write to any `openxisf::output_sink`. `add_image()` takes them as bytes, or as a `std::span<const T>` of the type of
+the sample format, which `std::span(samples)` gives here since `samples` is const; a span of samples that are not const
+is given as `std::span<const float>(samples)`.
 
 `save_distributed()` writes a distributed unit instead: a header file, and a data blocks file that the header locates
 relative to its own directory, so that the two can move together. A unit opened from a path finds its data blocks files
@@ -389,18 +417,21 @@ These rules hold throughout the API.
 - **Thread safety.** There is no mutable global state. The const member functions of a `reader` can be called from any
   number of threads at once, also to read pixels; `load_ancillary_data()`, the only one that changes it, needs exclusive
   access. An `astrometric_solution` is immutable, and any number of threads can use it at once. Writers and values are
-  thread-compatible, like standard containers. The file
-  and memory sources can be read from any number of threads at once; the library calls a source that does not declare
-  concurrent reads from one thread at a time. Built with oneTBB, the library also works in parallel within one call, in
-  the task arena of the calling thread and without changing the global settings of oneTBB; sources, sinks and progress
-  functions are still called from the calling thread.
+  thread-compatible, like standard containers. The file and memory sources can be read from any number of threads at
+  once; the library calls a source that does not declare concurrent reads from one thread at a time. Built with oneTBB,
+  the library also works in parallel within one call, in the task arena of the calling thread and without changing the
+  global settings of oneTBB; sources, sinks and progress functions are still called from the calling thread. That work
+  is kept apart from the application's own oneTBB work: a cancelled task group of the application does not cancel it,
+  and a thread that waits for it runs none of the application's tasks meanwhile.
 - **Errors.** Failures are exceptions derived from `openxisf::error`, one class per kind of failure, each with an error
-  code. A problem confined to one object of a unit, such as an unsupported codec, makes that object unavailable and is
-  reported as a diagnostic, in `reader::diagnostics()`; the rest of the unit stays readable. Harmless deviations from
-  the specification are diagnostics too. `read_options::strict` turns the problems that make an object unavailable into
-  failures. A writer refuses a unit that violates the specification with `openxisf::validation_error`, before it
-  writes anything. A long read or save can be cancelled from its progress function, which then throws
-  `openxisf::cancelled_error`.
+  code; besides them, `std::bad_alloc` when memory cannot be allocated, and the exceptions of the application's own
+  sources, sinks, resolvers and progress functions, which pass through unchanged. A problem confined to one object of a
+  unit, such as an unsupported codec, makes that object unavailable and is reported as a diagnostic, in
+  `reader::diagnostics()`; the rest of the unit stays readable. Harmless deviations from the specification are
+  diagnostics too; a reader lists at most 10,000, the last of which then counts the problems that follow.
+  `read_options::strict` turns the problems that make an object unavailable into failures. A writer refuses a unit
+  that violates the specification with `openxisf::validation_error`, before it writes anything. A long read or save can
+  be cancelled from its progress function, which then throws `openxisf::cancelled_error`.
 - **Text.** The API carries text as UTF-8 in `std::string` and `std::string_view`, paths included, on every platform.
   Invalid UTF-8 is rejected.
 
@@ -413,10 +444,13 @@ Files are untrusted input. The design goals are: every size and offset is overfl
 bounds-checked; allocations are limited and configurable, and so are the size of the XML header, the nesting of its
 elements and their number, and the window of Zstandard data; checksums are verified before data is used, compressed
 data included, which are never decompressed when their checksum fails; decompression produces exactly the declared size
-or fails; a document type declaration in the XML header is rejected; there is no network access; the paths of a
-distributed unit stay inside the directory of its header file, once symbolic links are followed, and absolute paths and
-URLs are opened only by a resolver of the application. They are checked continuously by fuzzing, sanitizers and static
-analysis.
+or fails, and a compressed block cannot declare more than its codec can decode from its bytes; a document type
+declaration in the XML header is rejected; there is no network access; the paths of a distributed unit stay inside the
+directory of its header file, once symbolic links are followed, and open no device, and absolute paths and URLs are
+opened only by a resolver of the application. Inside is a matter of paths: a hard link or a mount point in that
+directory counts as inside. These goals are checked continuously by fuzzing, sanitizers and static analysis. The size
+of the header bounds the memory that an open takes, up to about 40 times for a header made of `Image` elements
+(`limits.h` gives the details), and a reader lists at most 10,000 diagnostics.
 
 ## Contributing
 

@@ -113,12 +113,16 @@ scale scale_of(sample_format format)
 }
 
 // Compares every sample of the image of file, read as T in the given storage model, with the pattern. Returns the
-// number of samples that differ, after reporting the first few.
+// number of samples that differ, after reporting the first few; all of them when the image has another number.
 template <typename T> int count_differences(const reader& file, const pattern_image& image, pixel_storage storage)
 {
     const std::vector<T> samples = file.read_pixels<T>(0, {.storage = storage});
     const scale expected = scale_of(image.format);
     const std::size_t channels = image.channels;
+    if (samples.size() != channels * width * height) {
+        ADD_FAILURE() << image.id << ": " << samples.size() << " samples instead of " << channels * width * height;
+        return static_cast<int>(channels * width * height);
+    }
     int differences = 0;
     for (std::size_t c = 0; c < channels; ++c) {
         for (std::size_t y = 0; y < height; ++y) {

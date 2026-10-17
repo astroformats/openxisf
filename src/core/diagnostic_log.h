@@ -5,6 +5,7 @@
 
 #include <openxisf/error.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -36,9 +37,15 @@ struct error_origin
                                    const error_origin& origin = {});
 
 /// The diagnostics recorded while a unit is opened (spec §7). In strict mode, an error fails the open instead.
+///
+/// The log lists at most max_diagnostics of them, since a header can hold a million problems. When there are more, the
+/// last one stands for itself and all those after it: it says how many they are, and has the severity of the most
+/// serious of them and the code of the first of those, without a context.
 class diagnostic_log
 {
 public:
+    static constexpr std::size_t max_diagnostics = 10'000;
+
     explicit diagnostic_log(bool strict) noexcept : strict_(strict) {}
 
     /// Something the specification allows was ignored.
@@ -63,6 +70,8 @@ private:
 
     bool strict_;
     std::vector<diagnostic> entries_;
+    // The number of problems that the last entry stands for when the log is full, or zero.
+    std::uint64_t unlisted_ = 0;
 };
 
 } // namespace openxisf::detail

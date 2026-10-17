@@ -65,7 +65,7 @@ inline std::error_code stdio_error() noexcept
 } // namespace detail
 
 /// A C stream from its position at construction to its end. The stream must be open in binary mode and able to seek.
-/// Reads move its position.
+/// The constructor leaves the stream at its end, and reads move its position.
 class stdio_source final : public input_source
 {
 public:
@@ -166,10 +166,14 @@ public:
         if (offset > position_ || data.size() > position_ - offset) {
             throw usage_error(errc::invalid_argument, "a rewrite must stay within the bytes already written");
         }
+        // A seek flushes what the stream buffered, and the C library of Windows reports a failure of that flush only
+        // through the error indicator of the stream, which is cleared first.
         errno = 0;
+        std::clearerr(stream_);
         if (!detail::stdio_seek(stream_, static_cast<std::int64_t>(start_ + offset), SEEK_SET) ||
             std::fwrite(data.data(), 1, data.size(), stream_) != data.size() ||
-            !detail::stdio_seek(stream_, static_cast<std::int64_t>(start_ + position_), SEEK_SET)) {
+            !detail::stdio_seek(stream_, static_cast<std::int64_t>(start_ + position_), SEEK_SET) ||
+            std::ferror(stream_) != 0) {
             throw io_error(errc::write_failed, "cannot rewrite the FILE stream", detail::stdio_error(),
                            {.offset = offset});
         }
@@ -191,8 +195,9 @@ private:
 };
 
 /// A C++ input stream from its position at construction to its end. The stream must be able to seek, and binary on
-/// platforms where that matters. The source clears the stream's state and moves its position. When the stream's
-/// exceptions() mask is set, the stream's own exceptions pass through unchanged.
+/// platforms where that matters; the source seeks with offsets from the start, through the seekoff() of the stream
+/// buffer. The source clears the stream's state and moves its position. When the stream's exceptions() mask is set, the
+/// stream's own exceptions pass through unchanged.
 ///
 /// A stream buffer cannot be asked what it reads, so the source takes the stream's word that it can seek. On Windows a
 /// file stream on a pipe or a device, such as MSVC's, reports a position and seeks there without effect: it passes for
@@ -231,7 +236,8 @@ public:
             return;
         }
         stream_.clear();
-        stream_.seekg(static_cast<std::streamoff>(start_ + offset));
+        // From the start, with seekoff(), as the size was measured: a buffer may implement it without seekpos().
+        stream_.seekg(static_cast<std::streamoff>(start_ + offset), std::ios::beg);
         if (stream_.fail()) {
             throw io_error(errc::read_failed, "cannot seek in the input stream", {}, {.offset = offset});
         }
@@ -251,8 +257,8 @@ private:
 };
 
 /// A C++ output stream written from its position at construction. The stream must be binary on platforms where that
-/// matters. It supports rewrite() when the stream can seek. A stream opened with std::ios::app writes every byte at its
-/// end, so it must not be given to a sink that rewrites.
+/// matters. It supports rewrite() when the stream can seek, through the seekoff() of the stream buffer. A stream opened
+/// with std::ios::app writes every byte at its end, so it must not be given to a sink that rewrites.
 /// When the stream's exceptions() mask is set, the stream's own exceptions pass through unchanged.
 ///
 /// As for istream_source, the sink takes the stream's word that it can seek. On Windows a file stream on a pipe or a
@@ -295,9 +301,10 @@ public:
         if (offset > position_ || data.size() > position_ - offset) {
             throw usage_error(errc::invalid_argument, "a rewrite must stay within the bytes already written");
         }
-        stream_.seekp(static_cast<std::streamoff>(start_ + offset));
+        // From the start, with seekoff(), as the position was taken: a buffer may implement it without seekpos().
+        stream_.seekp(static_cast<std::streamoff>(start_ + offset), std::ios::beg);
         stream_.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-        stream_.seekp(static_cast<std::streamoff>(start_ + position_));
+        stream_.seekp(static_cast<std::streamoff>(start_ + position_), std::ios::beg);
         if (stream_.fail()) {
             throw io_error(errc::write_failed, "cannot rewrite the output stream", {}, {.offset = offset});
         }

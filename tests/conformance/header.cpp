@@ -266,10 +266,10 @@ TEST(conformance_header, an_extension_element_in_another_namespace_is_ignored)
     for (const extension& element : {
              // Nothing inside an extension is read.
              extension{.xml = R"(<e:Extension xmlns:e="urn:e"><Image uid="a"/><Image uid="a"/></e:Extension>)",
-                       .path = "/xisf/e:Extension[1]"},
+                       .path = "/xisf/Extension[1]"},
              extension{.xml = R"(<Extension xmlns="urn:example"><Unknown/></Extension>)", .path = "/xisf/Extension[1]"},
              // A prefix that is not declared names no namespace that could be the XISF one.
-             extension{.xml = R"(<u:Extension/>)", .path = "/xisf/u:Extension[1]"},
+             extension{.xml = R"(<u:Extension/>)", .path = "/xisf/Extension[1]"},
          }) {
         const reader file = open_header(header_xml(element.xml));
         EXPECT_TRUE(single_diagnostic(file.diagnostics(), severity::info, errc::unknown_element, element.path))

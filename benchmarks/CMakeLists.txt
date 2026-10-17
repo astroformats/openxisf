@@ -5,9 +5,7 @@ find_package(benchmark CONFIG REQUIRED)
 
 add_executable(openxisf_benchmarks main.cpp codecs.cpp units.cpp)
 target_link_libraries(openxisf_benchmarks PRIVATE openxisf_internal benchmark::benchmark)
-set_target_properties(openxisf_benchmarks PROPERTIES
-    CXX_EXTENSIONS OFF
-    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+set_target_properties(openxisf_benchmarks PROPERTIES CXX_EXTENSIONS OFF)
 openxisf_enable_warnings(openxisf_benchmarks)
 openxisf_enable_sanitizers(openxisf_benchmarks)
 if(OPENXISF_HARDENING)

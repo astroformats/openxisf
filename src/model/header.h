@@ -34,6 +34,9 @@ struct parsed_header
     pugi::xml_node root{};
     /// The detached XML signature that follows the root element. Empty when the unit is not signed.
     std::optional<header_signature> signature{};
+    /// The text that the document was parsed from, at the offsets that pugixml gives: the text given to parse_header(),
+    /// without a byte order mark, which the caller keeps for as long as it uses this view.
+    std::string_view text{};
 };
 
 /// Parses the header of a unit, which starts at offset in its source, and checks its XML declaration, its root element

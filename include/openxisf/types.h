@@ -146,7 +146,13 @@ enum class pixel_storage : std::uint8_t
 /// The name of a storage model in the specification: "Planar" or "Normal".
 [[nodiscard]] constexpr std::string_view pixel_storage_name(pixel_storage storage) noexcept
 {
-    return storage == pixel_storage::planar ? "Planar" : "Normal";
+    switch (storage) {
+    case pixel_storage::planar:
+        return "Planar";
+    case pixel_storage::normal:
+        return "Normal";
+    }
+    return {};
 }
 
 /// What an image is, for applications that process astronomical images (spec §11.5.1, Table 12).
@@ -254,11 +260,12 @@ struct geometry
     /// The number of channels, nominal and alpha. An image has at least one.
     std::uint64_t channels = 1;
 
-    /// The number of pixels: the product of the dimensions.
+    /// The number of pixels: the product of the dimensions, and 1 without dimensions, as for a default-constructed
+    /// geometry, which describes no image.
     /// @throws usage_error (errc::arithmetic_overflow) when it does not fit in 64 bits.
     [[nodiscard]] OPENXISF_API std::uint64_t pixel_count() const;
 
-    /// The number of samples: pixel_count() × channels.
+    /// The number of samples: pixel_count() * channels.
     /// @throws usage_error (errc::arithmetic_overflow) when it does not fit in 64 bits.
     [[nodiscard]] OPENXISF_API std::uint64_t sample_count() const;
 

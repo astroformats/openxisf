@@ -7,9 +7,7 @@
 function(openxisf_add_sample name)
     add_executable(${name} ${name}.cpp)
     target_link_libraries(${name} PRIVATE openxisf::openxisf)
-    set_target_properties(${name} PROPERTIES
-        CXX_EXTENSIONS OFF
-        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+    set_target_properties(${name} PROPERTIES CXX_EXTENSIONS OFF)
     # Windows: the UTF-8 arguments of arguments.h come from CommandLineToArgvW() of shell32, and windows.h comes without
     # the min and max macros.
     if(WIN32)
@@ -38,6 +36,23 @@ add_test(NAME example.read_info.astrometry
         "-DEXPECTED=astrometric solution 1[.]0 [(]Gnomonic, distortion model layer[)], centre at RA 83[.]82"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/expect_output.cmake")
 set_tests_properties(example.read_info.astrometry PROPERTIES LABELS example)
+# A String that the program cuts in a character of two bytes, the 57th and 58th, which the cut leaves out whole.
+string(REPEAT "a" 56 letters)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/long_string.xish"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\">\n"
+    "  <Metadata>\n"
+    "    <Property id=\"XISF:CreationTime\" type=\"TimePoint\" value=\"2026-10-17T00:00:00Z\"/>\n"
+    "    <Property id=\"XISF:CreatorApplication\" type=\"String\">read_info test</Property>\n"
+    "  </Metadata>\n"
+    "  <Property id=\"Test:Text\" type=\"String\">${letters}&#233;bbbbbbbbbb</Property>\n"
+    "</xisf>\n")
+add_test(NAME example.read_info.long_string
+    COMMAND "${CMAKE_COMMAND}" "-DPROGRAM=$<TARGET_FILE:read_info>"
+        "-DARGUMENT=${CMAKE_CURRENT_BINARY_DIR}/long_string.xish"
+        "-DEXPECTED=Test:Text [(]String[)]: .${letters}[.][.][.]."
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/expect_output.cmake")
+set_tests_properties(example.read_info.long_string PROPERTIES LABELS example)
 openxisf_add_sample(read_pixels "${sample_data}/a4-rgb-f32.xisf")
 openxisf_add_sample(stream_io "${sample_data}/a6-rgba-u16.xisf")
 openxisf_add_sample(write_image "${CMAKE_CURRENT_BINARY_DIR}/write_image.xisf")

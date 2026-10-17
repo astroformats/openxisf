@@ -66,6 +66,13 @@ struct restricted_character
 /// The character data of element: the text of its character data and CDATA children, in order.
 [[nodiscard]] std::string character_data(const pugi::xml_node& element);
 
+/// The character data of element as XML 1.0 defines them, where pugixml loses white space: taken from text, which its
+/// document was parsed from, when the content of element holds a comment, a processing instruction or a CDATA
+/// section, with references replaced as parse_xml() replaces them, CDATA sections as they are, comments and processing
+/// instructions left out, line ends normalized and the content of child elements skipped; otherwise
+/// character_data(element), the same text.
+[[nodiscard]] std::string character_data(const pugi::xml_node& element, std::string_view text);
+
 /// Where node starts in the text it was parsed from: the '<' of an element. Empty when pugixml cannot tell.
 [[nodiscard]] std::optional<std::size_t> element_offset(const pugi::xml_node& element) noexcept;
 

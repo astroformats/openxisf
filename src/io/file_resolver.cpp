@@ -9,11 +9,14 @@
 #include "io/paths.h"
 #include "io/range_check.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace openxisf {
@@ -52,12 +55,38 @@ private:
     std::uint64_t size_;
 };
 
+// A . or .. step of a relative path follows a directory, as POSIX resolves a path (spec §10.3), so that a path whose
+// last step is one names a directory. Windows drops these steps from the text of a path before it looks at the file
+// system, and the realpath() of macOS skips a . step after a file: data.xisb/. and sub/more.dat/../more.dat would open
+// a file there, which Linux refuses.
+void check_dot_steps(const std::string& directory, const std::string& relative)
+{
+    std::size_t start = 0;
+    while (start <= relative.size()) {
+        const std::size_t end = std::min(relative.find('/', start), relative.size());
+        const std::string_view step = std::string_view(relative).substr(start, end - start);
+        // The directory of the header file comes before the first step.
+        if ((step == "." || step == "..") && start > 0) {
+            const std::string before = relative.substr(0, start - 1);
+            if (!detail::is_directory(detail::relative_system_path(directory, before))) {
+                throw io_error(errc::open_failed,
+                               "the path " + detail::quote(relative) + " has a " + std::string(step) + " step after " +
+                                   detail::quote(before) + ", which is not a directory",
+                               std::make_error_code(std::errc::not_a_directory));
+            }
+        }
+        start = end + 1;
+    }
+}
+
 // A relative path leads to a file inside the directory once both are canonical, so that neither .. nor a symbolic
 // link takes it out (spec §10.3 lets a path hold both).
 std::unique_ptr<input_source> open_inside(const std::string& directory, const std::string& relative)
 {
+    const std::string path = detail::relative_system_path(directory, relative);
+    check_dot_steps(directory, relative);
     const std::string base = detail::native_file::find(directory).name();
-    const detail::native_file found = detail::native_file::find(detail::relative_system_path(directory, relative));
+    const detail::native_file found = detail::native_file::find(path);
     if (!detail::is_inside(found.name(), base)) {
         throw unsupported_error(errc::location_not_allowed, "the path " + detail::quote(relative) + " leads to " +
                                                                 found.name() +

@@ -42,8 +42,10 @@ struct ancillary_elements
 ///   specification are errors;
 /// - a keyword name outside the grammar of FITS, a missing value or comment attribute of a keyword, a value or comment
 ///   that is not printable ASCII, a value of a COMMENT or HISTORY keyword, a profile that does not start with the
-///   header of an ICC profile, and luminance coefficients that differ from those that the chromaticities give by more
-///   than luminance_tolerance are warnings, and the element is read as written.
+///   header of an ICC profile, luminance coefficients that differ from those that the chromaticities give by more than
+///   luminance_tolerance, and chromaticities that give luminance coefficients outside [0, 1] are warnings, and the
+///   element is read as written; a keyword name padded with trailing spaces is a warning too, and is read without
+///   them.
 [[nodiscard]] ancillary_elements read_ancillary(const unit_outline& outline, const std::vector<data_block>& blocks,
                                                 const thread_safe_source& source, const limits& limits,
                                                 ancillary_budget& budget, bool load_blocks, diagnostic_log& log);

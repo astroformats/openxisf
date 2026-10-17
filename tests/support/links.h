@@ -10,8 +10,8 @@
 namespace openxisf::test {
 
 /// Creates a symbolic link at link to target, a file or a directory. False when Windows does not let the process create
-/// one, which needs a privilege or developer mode there; on other systems, which need none, a failure throws
-/// std::system_error, so that a test fails rather than skips.
+/// one, which needs a privilege or developer mode there; any other failure throws std::system_error, so that a test
+/// fails rather than skips.
 [[nodiscard]] bool create_symbolic_link(const std::filesystem::path& target, const std::filesystem::path& link);
 
 #if defined(_WIN32)
