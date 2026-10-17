@@ -54,8 +54,9 @@ struct distributed_unit
 };
 
 /// Writes a distributed unit to the directory of OPENXISF_WRITTEN_UNITS_DIR, when it is set, as record_unit() writes a
-/// monolithic file: name.xml, the header, and the unit itself in a directory of that name.
-void record_distributed_unit(const distributed_unit& unit);
+/// monolithic file: name.xml, the header, and the unit itself in a directory of that name, its data blocks file at
+/// blocks_path from the header file, which the header names.
+void record_distributed_unit(const distributed_unit& unit, std::string_view blocks_path = blocks_file_name);
 
 /// The distributed unit that output writes into sinks of the given kind, recorded with record_distributed_unit().
 [[nodiscard]] distributed_unit written_distributed(const writer& output, sink_kind kind = sink_kind::rewritable);

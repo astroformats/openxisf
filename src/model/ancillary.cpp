@@ -134,7 +134,8 @@ private:
     }
 
     // -----------------------------------------------------------------------------------------------------------------
-    // Spec §11.6: a FITS keyword is kept as written; only a missing name leaves nothing to keep.
+    // Spec §11.6: a FITS keyword is kept as written, but for the padding of its name; only a missing name leaves
+    // nothing to keep.
 
     std::optional<fits_keyword> read_keyword()
     {
@@ -142,7 +143,10 @@ private:
         if (!name) {
             return std::nullopt;
         }
-        fits_keyword keyword{.name = std::string(*name)};
+        // Names are left-justified without spaces inside, so trailing spaces are the padding of an encoder that wrote
+        // eight characters, which the first edition of the specification did not forbid (spec §11.6.1).
+        const std::string_view unpadded = name->substr(0, name->find_last_not_of(' ') + 1);
+        fits_keyword keyword{.name = std::string(unpadded)};
         if (keyword.name.empty()) {
             // The blank keyword of FITS, which the XML schema of XISF does not allow. It is kept, like the other names
             // that break the rules, and the writer refuses it.
@@ -152,8 +156,13 @@ private:
                          context("name"));
         } else if (!is_fits_keyword_name(keyword.name)) {
             log_.warning(errc::invalid_fits_keyword,
-                         quote(keyword.name) + " is not a FITS keyword name of at most eight upper-case letters, "
-                                               "digits, hyphens and underscores, without padding",
+                         quote(*name) + " is not a FITS keyword name of at most eight upper-case letters, "
+                                        "digits, hyphens and underscores, without padding",
+                         context("name"));
+        } else if (unpadded.size() != name->size()) {
+            log_.warning(errc::invalid_fits_keyword,
+                         "the FITS keyword name " + quote(*name) +
+                             " is padded with spaces, which XISF does not allow, and is read without them",
                          context("name"));
         }
         keyword.value = optional_text("value");
@@ -260,6 +269,14 @@ private:
                              context("Y"));
                 break;
             }
+        }
+        // The writer writes the derived ones, which must be in [0, 1], and refuses the element otherwise.
+        if (!derived_luminance_in_range(derived)) {
+            log_.warning(code,
+                         "the luminance coefficients that the chromaticity coordinates give relative to D50, " +
+                             std::to_string(derived[0]) + ":" + std::to_string(derived[1]) + ":" +
+                             std::to_string(derived[2]) + ", are not in [0, 1]",
+                         context("Y"));
         }
         return space;
     }

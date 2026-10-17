@@ -137,19 +137,16 @@ pugi::xml_node next_sibling_element(const pugi::xml_node& node)
     return sibling;
 }
 
-void append_step(std::string& path, std::string_view name, std::size_t position)
+// The path of the child element named name at position among the children of parent, which is no_element for the root
+// element: the path of the parent and a step of the local name.
+std::string child_path(const unit_outline& outline, std::size_t parent, std::string_view name, std::size_t position)
 {
+    std::string path = outline.path(parent);
     path += '/';
-    path += name;
+    path += local_name(name);
     path += '[';
     path += std::to_string(position);
     path += ']';
-}
-
-std::string child_path(const unit_outline& outline, std::size_t parent, std::string_view name, std::size_t position)
-{
-    std::string path = parent == no_element ? "/" + std::string(outline.root.name()) : outline.path(parent);
-    append_step(path, name, position);
     return path;
 }
 
@@ -244,7 +241,11 @@ void walk(unit_outline& outline, uid_table& uids, diagnostic_log& log)
         const pugi::xml_node node = top.next;
         top.next = next_sibling_element(node);
         const std::size_t parent = top.index;
-        const std::size_t position = ++seen[stack.size() - 1][node.name()];
+        const std::size_t position = ++seen[stack.size() - 1][local_name(node.name())];
+        // The paths of the children of an element are built from its own, computed when the first one is seen.
+        if (parent != no_element && outline.elements[parent].path.empty()) {
+            outline.elements[parent].path = outline.path(parent);
+        }
 
         scope.enter(node);
         const bool xisf = is_xisf_namespace(scope.namespace_of(node.name()));
@@ -318,21 +319,19 @@ bool is_unique_element_id(std::string_view id) noexcept
 
 std::string unit_outline::path(std::size_t index) const
 {
-    std::vector<std::size_t> chain;
-    for (std::size_t i = index; i != no_element; i = elements[i].parent) {
-        chain.push_back(i);
+    if (index == no_element) {
+        return root_path;
     }
-    std::ranges::reverse(chain);
-    std::string result = "/" + std::string(root.name());
-    for (const std::size_t i : chain) {
-        append_step(result, elements[i].node.name(), elements[i].position);
+    const outline_element& element = elements[index];
+    if (!element.path.empty()) {
+        return element.path;
     }
-    return result;
+    return child_path(*this, element.parent, element.node.name(), element.position);
 }
 
 unit_outline build_outline(const pugi::xml_node& root, diagnostic_log& log)
 {
-    unit_outline outline{.root = root};
+    unit_outline outline{.root = root, .root_path = "/" + std::string(local_name(root.name()))};
     uid_table uids;
     walk(outline, uids, log);
     resolve_references(outline, uids, log);

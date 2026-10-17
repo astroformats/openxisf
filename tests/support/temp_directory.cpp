@@ -11,8 +11,10 @@
 #include <windows.h>
 #endif
 
+#include <array>
 #include <cstdint>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 
 namespace openxisf::test {
@@ -41,6 +43,19 @@ std::filesystem::path long_form(const std::filesystem::path& path)
     return {LR"(\\?\)" + preferred.native()};
 #else
     return path;
+#endif
+}
+
+bool is_device_name(std::string_view path)
+{
+#if defined(_WIN32)
+    const std::wstring wide = path_of(path).native();
+    std::array<wchar_t, 1024> full{};
+    const DWORD length = GetFullPathNameW(wide.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
+    return length != 0 && length < full.size() && std::wstring_view(full.data(), length).starts_with(LR"(\\.\)");
+#else
+    (void)path;
+    return false;
 #endif
 }
 

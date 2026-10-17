@@ -74,9 +74,11 @@ int window_log(std::uint64_t max_window)
     return std::clamp(63 - std::countl_zero(max_window), bounds.lowerBound, bounds.upperBound);
 }
 
+} // namespace
+
 // The input must be exactly one frame of compressed data: not a skippable frame, nor a frame of an older format, and
 // with nothing after it.
-void check_frame(std::span<const std::byte> input, std::size_t expected)
+void zstd_check_frame(std::span<const std::byte> input, std::uint64_t expected)
 {
     const auto byte_at = [&input](std::size_t i) { return static_cast<std::uint32_t>(input[i]) << (8 * i); };
     if (input.size() < 4 || (byte_at(0) | byte_at(1) | byte_at(2) | byte_at(3)) != ZSTD_MAGICNUMBER) {
@@ -100,11 +102,9 @@ void check_frame(std::span<const std::byte> input, std::size_t expected)
     }
 }
 
-} // namespace
-
 void zstd_decompress(std::span<const std::byte> input, std::span<std::byte> output, std::uint64_t max_window)
 {
-    check_frame(input, output.size());
+    zstd_check_frame(input, output.size());
     const std::unique_ptr<ZSTD_DCtx, context_deleter> context(ZSTD_createDCtx());
     if (!context) {
         throw std::bad_alloc();
@@ -152,18 +152,35 @@ bool zstd_needs_window(std::span<const std::byte> input) noexcept
     return ZSTD_getFrameContentSize(input.data(), input.size()) == ZSTD_CONTENTSIZE_UNKNOWN;
 }
 
-void zstd_compress(std::span<const std::byte> input, int level, std::vector<std::byte>& output)
+struct zstd_encoder::state
 {
-    const std::unique_ptr<ZSTD_CCtx, context_deleter> context(ZSTD_createCCtx());
-    if (!context) {
+    std::unique_ptr<ZSTD_CCtx, context_deleter> context;
+};
+
+zstd_encoder::zstd_encoder(int level) : state_(std::make_unique<state>())
+{
+    state_->context.reset(ZSTD_createCCtx());
+    if (!state_->context) {
         throw std::bad_alloc();
     }
-    (void)checked(ZSTD_CCtx_setParameter(context.get(), ZSTD_c_compressionLevel, level));
+    (void)checked(ZSTD_CCtx_setParameter(state_->context.get(), ZSTD_c_compressionLevel, level));
+}
+
+zstd_encoder::~zstd_encoder() = default;
+
+// ZSTD_compress2() starts a new frame with the parameters of the context, whatever the context did before.
+void zstd_encoder::compress(std::span<const std::byte> input, std::vector<std::byte>& output)
+{
     const std::size_t start = output.size();
     output.resize(start + ZSTD_compressBound(input.size()));
-    const std::size_t written = checked(
-        ZSTD_compress2(context.get(), output.data() + start, output.size() - start, input.data(), input.size()));
+    const std::size_t written = checked(ZSTD_compress2(state_->context.get(), output.data() + start,
+                                                       output.size() - start, input.data(), input.size()));
     output.resize(start + written);
+}
+
+void zstd_compress(std::span<const std::byte> input, int level, std::vector<std::byte>& output)
+{
+    zstd_encoder(level).compress(input, output);
 }
 
 } // namespace openxisf::detail

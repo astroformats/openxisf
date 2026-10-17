@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -194,16 +195,63 @@ TEST(conformance_table, a_table_has_a_property_identifier)
 TEST(conformance_table, a_table_identifier_is_unique_among_the_properties_of_its_object)
 {
     // Spec §8.4.1: a table is a property; the table is left out.
-    const reader file = open_body(image_xml({}, R"(<Property id="T" type="Int32" value="1"/>)" + string_table({})) +
-                                  R"(<Property id="T" type="Int32" value="1"/>)" + string_table({}) + string_table({}));
-    ASSERT_EQ(file.diagnostics().size(), 3U) << openxisf::test::describe(file.diagnostics());
+    const reader file =
+        open_body(image_xml({}, R"(<Property id="T" type="Int32" value="1"/>)" + string_table({}) + string_table({})));
+    ASSERT_EQ(file.diagnostics().size(), 2U) << openxisf::test::describe(file.diagnostics());
     for (const openxisf::diagnostic& entry : file.diagnostics()) {
         EXPECT_EQ(entry.code, errc::duplicate_property_id);
         EXPECT_EQ(entry.severity, severity::error);
     }
     EXPECT_TRUE(file.image(0).tables.empty());
     EXPECT_TRUE(file.image(0).properties.contains("T"));
+}
+
+TEST(conformance_table, standalone_tables_and_properties_of_one_identifier_are_tolerated)
+{
+    // Spec §8.4: standalone properties, tables among them, are associated with no object, so their identifiers need not
+    // be unique. The reader returns the first of each identifier, with a warning about each other, and each image gets
+    // the table that its Reference names.
+    const reader file = open_body(R"(<Property id="T" type="Int32" value="1"/>)" + string_table({}) + string_table({}),
+                                  {.strict = true});
+    ASSERT_EQ(file.diagnostics().size(), 2U) << openxisf::test::describe(file.diagnostics());
+    for (const openxisf::diagnostic& entry : file.diagnostics()) {
+        EXPECT_EQ(entry.code, errc::duplicate_property_id);
+        EXPECT_EQ(entry.severity, severity::warning);
+    }
+    EXPECT_EQ(file.diagnostics()[1].context.element, "/xisf/Table[2]");
     EXPECT_TRUE(file.tables().empty());
+    EXPECT_TRUE(file.properties().contains("T"));
+
+    const reader named =
+        open_body(string_table("<Row><Cell>red</Cell></Row>", R"(uid="red")") +
+                      string_table("<Row><Cell>green</Cell></Row>", R"(uid="green")") +
+                      image_xml({}, R"(<Reference ref="red"/>)") + image_xml({}, R"(<Reference ref="green"/>)"),
+                  {.strict = true});
+    EXPECT_TRUE(
+        single_diagnostic(named.diagnostics(), severity::warning, errc::duplicate_property_id, "/xisf/Table[2]"));
+    ASSERT_EQ(named.tables().size(), 1U);
+    EXPECT_EQ(named.tables()[0].rows.at(0).at(0), property_value("red"));
+    ASSERT_EQ(named.image(0).tables.size(), 1U);
+    EXPECT_EQ(named.image(0).tables[0].rows.at(0).at(0), property_value("red"));
+    ASSERT_EQ(named.image(1).tables.size(), 1U);
+    EXPECT_EQ(named.image(1).tables[0].rows.at(0).at(0), property_value("green"));
+}
+
+TEST(conformance_table, a_table_associated_twice_with_one_object_is_the_same_table)
+{
+    // Contained and named, or named twice: the object has the table once, and the Reference that associates it again
+    // is a warning that says so.
+    for (const auto& [body, reference] : std::initializer_list<std::pair<std::string, std::string_view>>{
+             {image_xml({}, string_table({}, R"(uid="t")") + R"(<Reference ref="t"/>)"), "/xisf/Image[1]/Reference[1]"},
+             {string_table({}, R"(uid="t")") + image_xml({}, R"(<Reference ref="t"/><Reference ref="t"/>)"),
+              "/xisf/Image[1]/Reference[2]"}}) {
+        const reader file = open_body(body, {.strict = true});
+        ASSERT_TRUE(single_diagnostic(file.diagnostics(), severity::warning, errc::invalid_reference, reference))
+            << body;
+        EXPECT_NE(file.diagnostics().front().message.find("same table"), std::string::npos)
+            << file.diagnostics().front().message;
+        EXPECT_EQ(file.image(0).tables.size(), 1U) << body;
+    }
 }
 
 // -----------------------------------------------------------------------------------------------------------------
@@ -264,11 +312,24 @@ TEST(conformance_table, a_field_has_an_identifier_and_a_type)
 {
     EXPECT_TRUE(unavailable(open_body(R"(<Table id="T"><Structure><Field type="String"/></Structure></Table>)"),
                             errc::invalid_property_id, "/xisf/Table[1]/Structure[1]/Field[1]"));
+    EXPECT_TRUE(unavailable(open_body(R"(<Table id="T"><Structure><Field id="" type="String"/></Structure></Table>)"),
+                            errc::invalid_property_id, "/xisf/Table[1]/Structure[1]/Field[1]"));
     EXPECT_TRUE(unavailable(open_body(R"(<Table id="T"><Structure><Field id="f"/></Structure></Table>)"),
                             errc::invalid_table, "/xisf/Table[1]/Structure[1]/Field[1]"));
     // A field is not of table type (spec §8.4.4.7), and no property type has that name.
     EXPECT_TRUE(unavailable(open_body(R"(<Table id="T"><Structure><Field id="f" type="Table"/></Structure></Table>)"),
                             errc::unsupported_property_type, "/xisf/Table[1]/Structure[1]/Field[1]"));
+}
+
+TEST(conformance_table, a_field_identifier_outside_the_grammar_is_tolerated)
+{
+    // Spec §11.2.1 gives fields property identifiers; another one is a warning, as for a property.
+    const reader file = open_body(R"(<Table id="T"><Structure><Field id="a field" type="String"/></Structure>)"
+                                  R"(<Row><Cell>x</Cell></Row></Table>)");
+    EXPECT_TRUE(single_diagnostic(file.diagnostics(), severity::warning, errc::invalid_property_id,
+                                  "/xisf/Table[1]/Structure[1]/Field[1]"));
+    ASSERT_EQ(file.tables().size(), 1U);
+    EXPECT_EQ(file.tables()[0].fields.at(0).id, "a field");
 }
 
 TEST(conformance_table, the_field_identifiers_of_a_structure_are_unique)
@@ -308,6 +369,18 @@ TEST(conformance_table, a_cell_holds_a_value_of_the_type_of_its_field)
     const reader missing = open_body(R"(<Table id="T"><Structure><Field id="n" type="UInt8"/></Structure>)"
                                      R"(<Row><Cell/></Row></Table>)");
     EXPECT_TRUE(unavailable(missing, errc::invalid_property, "/xisf/Table[1]/Row[1]/Cell[1]"));
+}
+
+TEST(conformance_table, a_string_cell_keeps_the_white_space_beside_markup)
+{
+    // Spec §11.3.3 serializes a cell as a property value (spec §11.1.6): all its white space is significant, beside a
+    // comment, a processing instruction or a CDATA section too.
+    const reader file = open_body(string_table("<Row><Cell> <!-- c -->a</Cell></Row><Row><Cell>a<?pi?> </Cell></Row>"
+                                               "<Row><Cell> <![CDATA[<b>]]> </Cell></Row>"));
+    EXPECT_TRUE(no_diagnostics(file.diagnostics()));
+    ASSERT_EQ(file.tables().size(), 1U);
+    const std::vector<std::vector<property_value>> rows{{" a"}, {"a "}, {" <b> "}};
+    EXPECT_EQ(file.tables()[0].rows, rows);
 }
 
 TEST(conformance_table, a_cell_has_no_id_type_or_format)

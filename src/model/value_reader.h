@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 // The values of Property elements and of the Cell elements of tables, which serialize a value the same way (spec §11.1,
 // §11.3.3).
@@ -40,10 +41,12 @@ class value_reader
 {
 public:
     /// With load_blocks false, a value in a data block is not read: read() returns nothing for it, without a
-    /// diagnostic.
+    /// diagnostic. header_text is the text that the elements were parsed from (parsed_header::text), which gives the
+    /// character data of a String around a comment, a processing instruction or a CDATA section (character_data()).
     value_reader(const thread_safe_source& source, const limits& limits, ancillary_budget& budget, bool load_blocks,
-                 diagnostic_log& log) noexcept
-        : source_(source), limits_(limits), budget_(budget), load_blocks_(load_blocks), log_(log)
+                 std::string_view header_text, diagnostic_log& log) noexcept
+        : source_(source), limits_(limits), budget_(budget), load_blocks_(load_blocks), header_text_(header_text),
+          log_(log)
     {}
 
     /// The value of element, or nothing when it cannot be read. Every problem is recorded in log:
@@ -51,8 +54,10 @@ public:
     ///   without a data block or whose length, rows or columns disagree with the size of its block, a String block that
     ///   is not UTF-8, a block that fails its checksum or does not decompress, and a block beyond the budget are
     ///   errors;
-    /// - an attribute or data that the type does not use, a vector without a length attribute, and an empty vector or
-    ///   matrix without a data block are warnings.
+    /// - a value attribute of a String, vector or matrix, a data block of a scalar, complex number or TimePoint, and
+    ///   character data beside the data block of a String other than an inline one, each ignored, a vector without a
+    ///   length attribute, and an empty vector or matrix without a data block are warnings. Other attributes that a
+    ///   type does not use, such as a length attribute of a scalar, are ignored without one.
     ///
     /// What the source throws passes through.
     [[nodiscard]] std::optional<property_value> read(const value_element& element);
@@ -76,6 +81,7 @@ private:
     const limits& limits_;
     ancillary_budget& budget_;
     bool load_blocks_;
+    std::string_view header_text_;
     diagnostic_log& log_;
 };
 

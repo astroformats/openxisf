@@ -86,6 +86,10 @@ struct block_context
 [[nodiscard]] std::vector<data_block> describe_blocks(const unit_outline& outline, const block_context& context,
                                                       diagnostic_log& log);
 
+/// Throws the exception of throw_unit_error() for an unavailable block, as a read of it does, so that a caller can
+/// refuse it before it allocates anything for its data.
+void check_available(const data_block& block);
+
 /// The bytes of a block as stored: read from source, or from its external file, and verified against the checksum, but
 /// not decompressed. An attached or external block is verified before it is returned, and an inline or embedded one
 /// was verified when the unit was opened.

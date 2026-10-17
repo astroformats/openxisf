@@ -38,6 +38,19 @@ TEST(image, the_names_of_the_specification)
     EXPECT_EQ(openxisf::orientation_name(openxisf::orientation::rotate_minus_90_flip), "-90;flip");
 }
 
+TEST(image, a_value_outside_an_enumeration_has_no_name)
+{
+    // A cast gives such a value, as in a model that an application fills from numbers of its own.
+    // NOLINTBEGIN(clang-analyzer-optin.core.EnumCastOutOfRange): the values are outside on purpose
+    EXPECT_EQ(openxisf::sample_format_name(static_cast<sample_format>(8)), "");
+    EXPECT_EQ(openxisf::color_space_name(static_cast<color_space>(3)), "");
+    EXPECT_EQ(openxisf::pixel_storage_name(static_cast<openxisf::pixel_storage>(2)), "");
+    EXPECT_EQ(openxisf::image_type_name(static_cast<openxisf::image_type>(15)), "");
+    EXPECT_EQ(openxisf::orientation_name(static_cast<openxisf::orientation>(8)), "");
+    EXPECT_EQ(openxisf::resolution_unit_name(static_cast<openxisf::resolution_unit>(2)), "");
+    // NOLINTEND(clang-analyzer-optin.core.EnumCastOutOfRange)
+}
+
 TEST(image, the_size_and_the_cpp_type_of_each_sample_format)
 {
     static_assert(openxisf::sample_size(sample_format::uint8) == 1);

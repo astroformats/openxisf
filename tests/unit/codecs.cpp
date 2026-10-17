@@ -3,7 +3,8 @@
 
 // The codec adapters, one subblock at a time (spec §10.6.3 to §10.6.10): each decoder fills its output exactly from all
 // of its input, or fails with corrupt_compressed_data. Round trips of every codec are in compressed_block.cpp; here the
-// streams are malformed, or built by hand from RFC 1950, the LZ4 block format and RFC 8878.
+// streams are malformed, or built by hand from RFC 1950, the LZ4 block format and RFC 8878, and the encoders that keep
+// their state are compared with the libraries' own calls.
 
 #include "codec/codecs.h"
 
@@ -14,12 +15,17 @@
 #include "support/throws.h"
 
 #include <gtest/gtest.h>
+#include <lz4.h>
+#include <lz4hc.h>
+#include <zlib.h>
+#include <zstd.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -303,6 +309,146 @@ TEST(zstd_codec, the_frames_of_the_library_need_no_window)
     zstd_compress(data, 19, frame);
     ASSERT_LT(frame.size(), data.size() / 2);
     EXPECT_EQ(decoded(zstd_decoder(1024), frame, data.size()), data);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Encoders that keep their state from one subblock to the next
+
+// Inputs of mixed sizes and contents that an encoder compresses one after another: empty, a byte, repeated and random
+// data, more than the 64 KiB window of LZ4, and an input twice in a row, which an encoder that kept anything of the
+// previous input would compress better the second time.
+std::vector<std::vector<std::byte>> mixed_inputs()
+{
+    openxisf::detail::xoshiro256starstar random({11, 12, 13, 14});
+    const auto random_bytes = [&random](std::size_t size) {
+        std::vector<std::byte> data(size);
+        for (std::byte& value : data) {
+            value = static_cast<std::byte>(random() & 0xFFU);
+        }
+        return data;
+    };
+    const std::vector<std::byte> repeated = joined(random_bytes(3000), random_bytes(3000));
+    std::vector<std::vector<std::byte>> inputs{
+        random_bytes(100'000),
+        pattern(1),
+        {},
+        pattern(70'000),
+        random_bytes(17),
+        repeated,
+        repeated,
+        pattern(300),
+        random_bytes(65'536),
+        pattern(4096),
+        random_bytes(1),
+        joined(pattern(5000), random_bytes(5000)),
+        pattern(200),
+    };
+    // Repeated data, then the same data again in an input of its own.
+    inputs.push_back(joined(inputs[3], inputs[3]));
+    inputs.push_back(inputs[3]);
+    return inputs;
+}
+
+using encoding = std::function<void(std::span<const std::byte> input, std::vector<std::byte>& output)>;
+
+// An encoder, kept for every input, gives each the bytes that a new state of its library gives it at its level.
+void expect_bytes_of_a_new_state(const encoding& encoder, const encoding& new_state, int level)
+{
+    std::size_t index = 0;
+    for (const std::vector<std::byte>& input : mixed_inputs()) {
+        std::vector<std::byte> output = bytes("kept");
+        encoder(input, output);
+        std::vector<std::byte> expected = bytes("kept");
+        new_state(input, expected);
+        EXPECT_TRUE(output == expected) << "level " << level << ", input " << index;
+        ++index;
+    }
+}
+
+// The library gets a pointer to this byte for an empty input, never a null pointer.
+const char* chars_of(std::span<const std::byte> input, const std::byte& placeholder)
+{
+    return reinterpret_cast<const char*>(input.empty() ? &placeholder : input.data());
+}
+
+// The size of an input as a length of zlib, uLong: unsigned long, the type of std::size_t on Linux and macOS, where
+// GCC calls a cast to it useless, and narrower on Windows, where the conversion needs one.
+template <typename Length> Length zlib_length(std::size_t size)
+{
+    if constexpr (std::is_same_v<Length, std::size_t>) {
+        return size;
+    } else {
+        return static_cast<Length>(size);
+    }
+}
+
+// What 1.0.0 wrote for each subblock: zlib's compress2(), which makes a new stream with deflateInit().
+TEST(zlib_codec, an_encoder_gives_each_input_the_bytes_of_a_new_stream)
+{
+    for (int level = 0; level <= 9; ++level) {
+        openxisf::detail::zlib_encoder encoder(level);
+        expect_bytes_of_a_new_state(
+            [&encoder](std::span<const std::byte> input, std::vector<std::byte>& output) {
+                encoder.compress(input, output);
+            },
+            [level](std::span<const std::byte> input, std::vector<std::byte>& output) {
+                uLongf size = compressBound(zlib_length<uLong>(input.size()));
+                std::vector<std::byte> stream(size);
+                const std::byte placeholder{};
+                ASSERT_EQ(compress2(reinterpret_cast<Bytef*>(stream.data()), &size,
+                                    reinterpret_cast<const Bytef*>(chars_of(input, placeholder)),
+                                    zlib_length<uLong>(input.size()), level),
+                          Z_OK);
+                output.insert(output.end(), stream.begin(), stream.begin() + static_cast<std::ptrdiff_t>(size));
+            },
+            level);
+    }
+}
+
+// What 1.0.0 wrote for each subblock: LZ4_compress_HC(), which clears a new state.
+TEST(lz4_codec, an_encoder_gives_each_input_the_bytes_of_a_new_state)
+{
+    for (int level = 1; level <= 12; ++level) {
+        openxisf::detail::lz4hc_encoder encoder(level);
+        expect_bytes_of_a_new_state([&encoder](std::span<const std::byte> input,
+                                               std::vector<std::byte>& output) { encoder.compress(input, output); },
+                                    [level](std::span<const std::byte> input, std::vector<std::byte>& output) {
+                                        const int size = static_cast<int>(input.size());
+                                        std::vector<std::byte> block(static_cast<std::size_t>(LZ4_compressBound(size)));
+                                        const std::byte placeholder{};
+                                        const int written = LZ4_compress_HC(chars_of(input, placeholder),
+                                                                            reinterpret_cast<char*>(block.data()), size,
+                                                                            static_cast<int>(block.size()), level);
+                                        ASSERT_GT(written, 0);
+                                        output.insert(output.end(), block.begin(), block.begin() + written);
+                                    },
+                                    level);
+    }
+}
+
+// What 1.0.0 wrote for each subblock: ZSTD_compress2() with a new context at the level.
+TEST(zstd_codec, an_encoder_gives_each_input_the_bytes_of_a_new_context)
+{
+    for (int level = 1; level <= 22; ++level) {
+        openxisf::detail::zstd_encoder encoder(level);
+        expect_bytes_of_a_new_state(
+            [&encoder](std::span<const std::byte> input, std::vector<std::byte>& output) {
+                encoder.compress(input, output);
+            },
+            [level](std::span<const std::byte> input, std::vector<std::byte>& output) {
+                ZSTD_CCtx* const context = ZSTD_createCCtx();
+                ASSERT_NE(context, nullptr);
+                std::vector<std::byte> frame(ZSTD_compressBound(input.size()));
+                const std::size_t set = ZSTD_CCtx_setParameter(context, ZSTD_c_compressionLevel, level);
+                const std::size_t written =
+                    ZSTD_compress2(context, frame.data(), frame.size(), input.data(), input.size());
+                (void)ZSTD_freeCCtx(context);
+                ASSERT_EQ(ZSTD_isError(set), 0U);
+                ASSERT_EQ(ZSTD_isError(written), 0U);
+                output.insert(output.end(), frame.begin(), frame.begin() + static_cast<std::ptrdiff_t>(written));
+            },
+            level);
+    }
 }
 
 } // namespace

@@ -223,6 +223,27 @@ std::vector<std::pair<std::string, property_type>> reserved_property_types()
     return all;
 }
 
+std::optional<std::string> forbidden_image_value(const property& item)
+{
+    if (item.id == "Image:FrameNumber" && item.value.type() == property_type::uint32 &&
+        item.value.get<std::uint32_t>() == 0) {
+        return "the frame number is 0, and frame numbers start at one (spec §11.5.3.5)";
+    }
+    if ((item.id == "Image:GroupId" || item.id == "Image:SubgroupId") && item.value.type() == property_type::string) {
+        const auto& text = item.value.get<std::string>();
+        const auto is_first = [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        };
+        const auto is_next = [&is_first](char c) { return is_first(c) || c == '-' || c == '.'; };
+        if (text.empty() || !is_first(text.front()) ||
+            !std::ranges::all_of(std::string_view(text).substr(1), is_next)) {
+            return "the identifier of the " + std::string(item.id == "Image:GroupId" ? "group" : "subgroup") +
+                   " is not of the form [_a-zA-Z0-9][_a-zA-Z0-9-.]* (spec §11.5.3.5)";
+        }
+    }
+    return std::nullopt;
+}
+
 bool is_metadata_id(std::string_view id) noexcept
 {
     return id.starts_with("XISF:");

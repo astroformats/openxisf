@@ -93,21 +93,45 @@ TEST(outline, lists_the_elements_in_document_order_with_their_structure)
 
 TEST(outline, paths_count_the_siblings_of_the_same_name)
 {
+    // The XISF namespace has two prefixes here, x and the default one; the steps of a path are local names.
     const outlined unit = outline_of(R"(<x:xisf xmlns:x="http://www.pixinsight.com/xisf" version="1.0">)"
                                      R"(<x:Image><x:Property/><x:FITSKeyword/><x:Property/></x:Image>)"
-                                     R"(<x:Metadata/><x:Image><x:Property/></x:Image></x:xisf>)");
+                                     R"(<x:Metadata/><Image xmlns="http://www.pixinsight.com/xisf"><Property/>)"
+                                     R"(<x:Property/></Image></x:xisf>)");
 
     // The count starts again in each element.
     const std::vector<std::string> expected{
-        "/x:xisf/x:Image[1]",
-        "/x:xisf/x:Image[1]/x:Property[1]",
-        "/x:xisf/x:Image[1]/x:FITSKeyword[1]",
-        "/x:xisf/x:Image[1]/x:Property[2]",
-        "/x:xisf/x:Metadata[1]",
-        "/x:xisf/x:Image[2]",
-        "/x:xisf/x:Image[2]/x:Property[1]",
+        "/xisf/Image[1]",
+        "/xisf/Image[1]/Property[1]",
+        "/xisf/Image[1]/FITSKeyword[1]",
+        "/xisf/Image[1]/Property[2]",
+        "/xisf/Metadata[1]",
+        "/xisf/Image[2]",
+        "/xisf/Image[2]/Property[1]",
+        "/xisf/Image[2]/Property[2]",
     };
     EXPECT_EQ(paths(unit.outline), expected);
+}
+
+// A prefix of the XISF namespace tells nothing in a path, and one of any length can be declared.
+TEST(outline, the_paths_of_diagnostics_leave_out_the_prefixes_of_the_elements)
+{
+    // The XISF namespace is bound to P, which stands for a prefix of a thousand characters.
+    const std::string_view text = R"(<P:xisf xmlns:P="http://www.pixinsight.com/xisf" version="1.0"><P:Image uid="a">)"
+                                  R"(<Foo xmlns="http://www.pixinsight.com/xisf"/></P:Image><P:Image uid="a"/>)"
+                                  R"(<e:Extension xmlns:e="urn:e"/></P:xisf>)";
+    const std::string prefix(1000, 'p');
+    std::string root;
+    for (const char c : text) {
+        root += c == 'P' ? prefix : std::string(1, c);
+    }
+    const outlined unit = outline_of(root);
+
+    ASSERT_EQ(unit.diagnostics.size(), 3U) << openxisf::test::describe(unit.diagnostics);
+    EXPECT_EQ(unit.diagnostics[0].context.element, "/xisf/Image[1]/Foo[1]");
+    EXPECT_EQ(unit.diagnostics[1].context.element, "/xisf/Image[2]");
+    EXPECT_EQ(unit.diagnostics[1].message, "the uid 'a' is already the uid of /xisf/Image[1]");
+    EXPECT_EQ(unit.diagnostics[2].context.element, "/xisf/Extension[1]");
 }
 
 TEST(outline, leaves_out_ignored_elements_with_their_content)

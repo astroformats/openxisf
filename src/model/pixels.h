@@ -35,7 +35,9 @@ void read_pixels(const unit& opened, std::size_t index, std::span<std::byte> des
 [[nodiscard]] const image_info& typed_image_at(const unit& opened, std::size_t index, sample_format format);
 
 /// The number of samples of the image at index, for a typed read that allocates them. Throws what typed_image_at()
-/// throws, and limit_error with errc::allocation_too_large when its pixel data are larger than limits.max_allocation.
+/// throws; the error of its data block when that is unavailable, as a read throws it, so that nothing is allocated for
+/// a block that cannot be read; and limit_error with errc::allocation_too_large when its pixel data are larger than
+/// limits.max_allocation.
 [[nodiscard]] std::size_t typed_sample_count(const unit& opened, std::size_t index, sample_format format);
 
 } // namespace openxisf::detail

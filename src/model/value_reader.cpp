@@ -95,7 +95,8 @@ std::optional<property_value> value_reader::read_string(const value_element& ele
 {
     ignore_value_attribute(element);
     if (element.block == nullptr) {
-        return property_value(character_data(element.node));
+        // All of its white space, beside a comment, a processing instruction or a CDATA section too.
+        return property_value(character_data(element.node, header_text_));
     }
     if (!element.block->descriptor) {
         return std::nullopt;

@@ -6,6 +6,18 @@ configure_file(
     "${PROJECT_BINARY_DIR}/include/openxisf/version.h"
     @ONLY)
 
+# Whether the library is static, in an installed header that export.h includes: an application that takes only the
+# include and library directories of the package, as MSBuild and hand-written makefiles do, needs no definition.
+if(OPENXISF_SHARED)
+    set(OPENXISF_STATIC_DEFINE OFF)
+else()
+    set(OPENXISF_STATIC_DEFINE ON)
+endif()
+configure_file(
+    "${PROJECT_SOURCE_DIR}/cmake/linkage.h.in"
+    "${PROJECT_BINARY_DIR}/include/openxisf/linkage.h"
+    @ONLY)
+
 # The internal code, in namespace openxisf::detail.
 set(internal_sources
     algorithms/astrometric_model.cpp
@@ -114,13 +126,7 @@ set_target_properties(openxisf PROPERTIES
     VERSION "${PROJECT_VERSION}"
     SOVERSION "${OPENXISF_SOVERSION}"
     # The Debug library has a name of its own, so that Debug and Release builds install side by side in one prefix.
-    DEBUG_POSTFIX d
-    # The tests find the DLL next to their executable on Windows.
-    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
-
-if(NOT OPENXISF_SHARED)
-    target_compile_definitions(openxisf PUBLIC OPENXISF_STATIC_DEFINE)
-endif()
+    DEBUG_POSTFIX d)
 
 # windows.h without the min and max macros, which break the standard headers included after it.
 set(windows_definitions NOMINMAX WIN32_LEAN_AND_MEAN)

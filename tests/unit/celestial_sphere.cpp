@@ -218,6 +218,34 @@ TEST(celestial_sphere, the_native_pole_is_the_candidate_closest_to_its_native_la
     const spherical_rotation south =
         rotation({.ra = 50.0, .dec = 20.0}, {.phi = 0.0, .theta = 0.0}, {.phi = 0.0, .theta = -90.0});
     EXPECT_NEAR(south.native_pole().dec, -70.0, 1e-12);
+    // When both are as close, the second, u - v, as WCSLIB's celset() takes it: astropy 8.0.1 gives -70 for LATPOLE 0.
+    const spherical_rotation tie =
+        rotation({.ra = 50.0, .dec = 20.0}, {.phi = 0.0, .theta = 0.0}, {.phi = 0.0, .theta = 0.0});
+    EXPECT_NEAR(tie.native_pole().dec, -70.0, 1e-12);
+    const spherical_rotation above =
+        rotation({.ra = 50.0, .dec = 20.0}, {.phi = 0.0, .theta = 0.0}, {.phi = 0.0, .theta = 1e-9});
+    EXPECT_NEAR(above.native_pole().dec, 70.0, 1e-12);
+}
+
+TEST(celestial_sphere, the_native_pole_keeps_its_precision_near_a_celestial_pole)
+{
+    // A cylindrical projection whose reference point is 10^-k degrees from a celestial pole, north or south, at native
+    // (0, 0), has its native pole at 90 - |δ0| (equation [31]), which the double δ0 gives exactly. The arccosine of
+    // sin δ0, near 1, lost about 3e-15/ε degrees ε radians from the pole, 1.5e-7 degrees for k = 6, and from k = 7 on,
+    // where sin δ0 rounds to 1, the whole distance; the arctangent form keeps within 3e-14.
+    for (int k = 1; k <= 9; ++k) {
+        for (const double sign : {1.0, -1.0}) {
+            const double delta_0 = sign * (90.0 - std::pow(10.0, -k));
+            SCOPED_TRACE(delta_0);
+            const native_point reference_native{.phi = 0.0, .theta = 0.0};
+            const spherical_rotation turn = rotation({.ra = 30.0, .dec = delta_0}, reference_native,
+                                                     detail::default_pole_native(delta_0, reference_native));
+            EXPECT_NEAR(turn.native_pole().dec, 90.0 - std::abs(delta_0), 1e-12);
+            const native_point reference = turn.to_native({.ra = 30.0, .dec = delta_0});
+            EXPECT_NEAR(reference.theta, 0.0, 1e-12);
+            EXPECT_NEAR(reference.phi, 0.0, 1e-12);
+        }
+    }
 }
 
 TEST(celestial_sphere, parameters_without_a_native_pole_define_no_rotation)

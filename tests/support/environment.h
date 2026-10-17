@@ -17,8 +17,8 @@
 
 namespace openxisf::test {
 
-/// The value of an environment variable, in UTF-8, or nothing when it is not set. Tests read only two, both optional:
-/// OPENXISF_LARGE_SAMPLES_DIR and OPENXISF_WRITTEN_UNITS_DIR.
+/// The value of an environment variable, in UTF-8, or nothing when it is not set or empty, as an empty variable of a CI
+/// workflow is. Tests read only two, both optional: OPENXISF_LARGE_SAMPLES_DIR and OPENXISF_WRITTEN_UNITS_DIR.
 [[nodiscard]] inline std::optional<std::string> environment_variable(std::string_view name)
 {
 #if defined(_WIN32)
@@ -31,12 +31,15 @@ namespace openxisf::test {
     }
     std::u16string value(size, u'\0');
     value.resize(GetEnvironmentVariableW(key, reinterpret_cast<wchar_t*>(value.data()), size));
+    if (value.empty()) {
+        return std::nullopt;
+    }
     return detail::utf16_to_utf8(value);
 #else
     // No test sets environment variables, so reading one cannot race.
     // NOLINTNEXTLINE(concurrency-mt-unsafe)
     const char* value = std::getenv(std::string(name).c_str());
-    if (value == nullptr) {
+    if (value == nullptr || *value == '\0') {
         return std::nullopt;
     }
     return std::string(value);

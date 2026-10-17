@@ -12,6 +12,7 @@
 #include "codec/codecs.h"
 #include "codec/shuffle.h"
 #include "support/bytes.h"
+#include "support/faulty_io.h"
 #include "support/throws.h"
 
 #include <gtest/gtest.h>
@@ -24,7 +25,6 @@
 #include <new>
 #include <ostream>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -227,9 +227,11 @@ TEST(compressed_block, codec_output_of_the_size_of_its_data_is_not_stored)
     ADD_FAILURE() << "no noise and run of zeros make the output of LZ4 as long as its data";
 }
 
-TEST(compressed_block, subblocks_are_compressed_and_handed_over_one_at_a_time)
+TEST(compressed_block, subblocks_are_handed_over_in_order_with_their_sizes)
 {
-    // 2,500 bytes in subblocks of 1,000: each one reaches the store, in order, before the next one is compressed.
+    // 2,500 bytes in subblocks of 1,000: each one reaches the store, in order, with its sizes, on the calling thread.
+    // Whether a subblock is stored before the next is compressed depends on the build: with oneTBB a batch of them is
+    // compressed first.
     const std::vector<std::byte> data = samples(2500);
     for (const compression_codec codec : all_codecs) {
         std::vector<std::byte> stored;
@@ -254,9 +256,9 @@ TEST(compressed_block, subblocks_are_compressed_and_handed_over_one_at_a_time)
     EXPECT_THROW((void)openxisf::detail::compress_subblocks(data, {.max_subblock_size = 1000},
                                                             [&calls](auto, auto) {
                                                                 ++calls;
-                                                                throw std::runtime_error("stop");
+                                                                throw openxisf::test::injected_fault();
                                                             }),
-                 std::runtime_error);
+                 openxisf::test::injected_fault);
     EXPECT_EQ(calls, 1U);
 }
 
@@ -327,26 +329,94 @@ TEST(compressed_block, the_subblocks_account_for_every_byte_of_their_block)
 
 TEST(compressed_block, a_subblock_must_fit_the_decoder_of_its_codec)
 {
-    // LZ4 decodes at most 2^31 - 1 bytes at once, compressed or not. zlib and Zstandard have no limit.
+    // LZ4 decodes at most 2^31 - 1 bytes at once, compressed or not. zlib and Zstandard have no limit. 2^24 stored
+    // bytes can decode to 2^31 bytes with any codec.
     constexpr std::uint64_t largest = 0x7FFF'FFFF;
+    constexpr std::uint64_t stored = std::uint64_t{1} << 24;
     for (const compression_codec codec : all_codecs) {
         const bool lz4 = codec == compression_codec::lz4 || codec == compression_codec::lz4hc;
         const block_compression whole{.codec = codec, .uncompressed_size = largest + 1};
         const block_compression divided{.codec = codec,
                                         .uncompressed_size = largest + 1,
-                                        .subblocks = {{.compressed_size = 2, .uncompressed_size = largest},
+                                        .subblocks = {{.compressed_size = stored, .uncompressed_size = largest},
                                                       {.compressed_size = 1, .uncompressed_size = 1}}};
-        EXPECT_EQ(subblocks_of(divided, 3).size(), 2U);
+        EXPECT_EQ(subblocks_of(divided, stored + 1).size(), 2U);
         EXPECT_EQ(subblocks_of({.codec = codec, .uncompressed_size = 5}, largest).size(), 1U);
         if (lz4) {
-            EXPECT_TRUE(
-                throws<openxisf::invalid_data_error>(errc::invalid_subblocks, [&] { (void)subblocks_of(whole, 3); }));
+            EXPECT_TRUE(throws<openxisf::invalid_data_error>(errc::invalid_subblocks,
+                                                             [&] { (void)subblocks_of(whole, stored); }));
             EXPECT_TRUE(throws<openxisf::invalid_data_error>(errc::invalid_subblocks, [&] {
                 (void)subblocks_of({.codec = codec, .uncompressed_size = 5}, largest + 1);
             }));
         } else {
-            EXPECT_EQ(subblocks_of(whole, 3).size(), 1U) << name_of(codec);
+            EXPECT_EQ(subblocks_of(whole, stored).size(), 1U) << name_of(codec);
         }
+    }
+}
+
+TEST(compressed_block, a_subblock_cannot_declare_more_than_its_codec_decodes_from_its_bytes)
+{
+    // A zlib stream decodes to at most 1032 bytes for each of its bytes, an LZ4 block to 255 and a Zstandard frame to
+    // 32768, so 9 stored bytes give at most 9288, 2295 and 294912 bytes. A subblock stored as it is has equal sizes.
+    struct bound
+    {
+        compression_codec codec = compression_codec::zlib;
+        std::uint64_t ratio = 0;
+        std::uint64_t most = 0;
+    };
+    for (const bound& entry : {bound{.codec = compression_codec::zlib, .ratio = 1032, .most = 9288},
+                               bound{.codec = compression_codec::lz4, .ratio = 255, .most = 2295},
+                               bound{.codec = compression_codec::lz4hc, .ratio = 255, .most = 2295},
+                               bound{.codec = compression_codec::zstd, .ratio = 32768, .most = 294'912}}) {
+        SCOPED_TRACE(name_of(entry.codec));
+        EXPECT_EQ(subblocks_of({.codec = entry.codec, .uncompressed_size = entry.most}, 9).size(), 1U);
+        EXPECT_EQ(subblocks_of({.codec = entry.codec, .uncompressed_size = 0}, 9).size(), 1U);
+        try {
+            (void)subblocks_of({.codec = entry.codec, .uncompressed_size = entry.most + 1}, 9);
+            ADD_FAILURE() << "no error";
+        } catch (const openxisf::invalid_data_error& failure) {
+            EXPECT_EQ(failure.code(), errc::invalid_subblocks);
+            EXPECT_EQ(std::string_view(failure.what()),
+                      "the block declares " + std::to_string(entry.most + 1) + " bytes, but " + name_of(entry.codec) +
+                          " decodes at most " + std::to_string(entry.ratio) + " times its stored size, " +
+                          std::to_string(entry.most) + " bytes");
+        }
+        // The subblock that declares too much is named.
+        const block_compression divided{.codec = entry.codec,
+                                        .uncompressed_size = entry.most + 2,
+                                        .subblocks = {{.compressed_size = 1, .uncompressed_size = 1},
+                                                      {.compressed_size = 9, .uncompressed_size = entry.most + 1}}};
+        try {
+            (void)subblocks_of(divided, 10);
+            ADD_FAILURE() << "no error";
+        } catch (const openxisf::invalid_data_error& failure) {
+            EXPECT_EQ(failure.code(), errc::invalid_subblocks);
+            EXPECT_TRUE(std::string_view(failure.what()).starts_with("subblock 2 declares ")) << failure.what();
+        }
+        EXPECT_EQ(subblocks_of({.codec = entry.codec, .uncompressed_size = 1'000'000}, 1'000'000).size(), 1U);
+    }
+}
+
+TEST(compressed_block, the_densest_output_of_the_encoders_decodes_within_the_bounds)
+{
+    // Zeros at the highest level of each codec come close to its bound, and decode. Zstandard writes runs of 128 KiB in
+    // 4 bytes each, but the first of a frame and the header of the frame.
+    const std::vector<std::byte> zeros(std::size_t{4} << 20);
+    struct bound
+    {
+        compression_codec codec = compression_codec::zlib;
+        std::uint64_t ratio = 0;
+    };
+    for (const bound& entry :
+         {bound{.codec = compression_codec::zlib, .ratio = 1032}, bound{.codec = compression_codec::lz4, .ratio = 255},
+          bound{.codec = compression_codec::lz4hc, .ratio = 255},
+          bound{.codec = compression_codec::zstd, .ratio = 32768}}) {
+        SCOPED_TRACE(name_of(entry.codec));
+        const compressed_block block = compress_block(zeros, {.codec = entry.codec, .level = 100});
+        ASSERT_TRUE(block.compression.subblocks.empty());
+        EXPECT_LT(zeros.size(), entry.ratio * block.data.size());
+        EXPECT_GT(zeros.size(), entry.ratio * block.data.size() * 4 / 5) << block.data.size() << " bytes";
+        EXPECT_EQ(decompressed(block), zeros);
     }
 }
 
@@ -382,10 +452,10 @@ TEST(compressed_block, progress_follows_the_subblocks_and_can_stop_the_decompres
     EXPECT_THROW((void)decompress_block(block.data, block.compression, {},
                                         [](std::uint64_t done) {
                                             if (done == 2000) {
-                                                throw std::runtime_error("stop");
+                                                throw openxisf::test::injected_fault();
                                             }
                                         }),
-                 std::runtime_error);
+                 openxisf::test::injected_fault);
 }
 
 TEST(compressed_block, a_block_decompresses_into_memory_of_the_caller)
@@ -416,10 +486,11 @@ TEST(compressed_block, a_block_that_decompresses_beyond_the_allocation_limit_is_
                                               [&block] { (void)decompressed(block, {.max_allocation = 999}); }));
     EXPECT_EQ(decompressed(block, {.max_allocation = 1000}).size(), 1000U);
     EXPECT_EQ(decompressed(block, {.max_allocation = 0}).size(), 1000U);
-    // Without a limit, a size that no allocation can hold fails as an allocation does.
+    // Nor can a block declare a size that no allocation can hold: its codec cannot decode that much from its bytes.
     block_compression huge = block.compression;
     huge.uncompressed_size = std::uint64_t{1} << 63;
-    EXPECT_THROW((void)decompress_block(block.data, huge, {.max_allocation = 0}), std::bad_alloc);
+    EXPECT_TRUE(throws<openxisf::invalid_data_error>(
+        errc::invalid_subblocks, [&] { (void)decompress_block(block.data, huge, {.max_allocation = 0}); }));
 
     // Into memory of the caller, only a shuffled block needs a buffer of its size.
     std::vector<std::byte> destination(1000);

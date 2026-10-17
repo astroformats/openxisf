@@ -4,6 +4,7 @@
 #include "model/header_tree.h"
 
 #include <openxisf/color.h>
+#include <openxisf/error.h>
 #include <openxisf/version.h>
 
 #include "core/endian.h"
@@ -31,10 +32,6 @@ namespace {
 constexpr std::size_t icc_flags_last_byte = 47;
 
 constexpr std::string_view indentation = "   ";
-
-// The longest String written as character data. A longer one is written in a data block, since readers limit the size
-// of a header (64 MiB by default in OpenXISF), and a data block is read within the limits of loaded data.
-constexpr std::size_t max_character_data = std::size_t{1} << 20;
 
 std::string format_double(double value)
 {
@@ -184,19 +181,15 @@ private:
     }
 
     // Pixel data, which are attached: an Image element cannot have an inline block (spec §11.5), and a baseline encoder
-    // attaches them (spec §7.1). They are borrowed, but on a big-endian host, where a little-endian copy is made.
+    // attaches them (spec §7.1). They are borrowed, and on a big-endian host, where samples of more than one byte are
+    // swapped, marked for the copy of to_little_endian().
     void add_pixel_block(xml_element& element, std::span<const std::byte> pixels, sample_format format)
     {
         const std::size_t item_size = byte_order_item_size(format);
-        block_source source{.item_size = item_size};
-        if constexpr (std::endian::native == std::endian::big) {
-            source.owned.assign(pixels.begin(), pixels.end());
-            swap_byte_order(source.owned, item_size);
-        } else {
-            source.borrowed = pixels;
-        }
         element.block = blocks_.size();
-        blocks_.push_back(std::move(source));
+        blocks_.push_back({.borrowed = pixels,
+                           .item_size = item_size,
+                           .native_order = std::endian::native == std::endian::big && item_size > 1});
     }
 
     void serialize_value(xml_element& element, const property_value& value)
@@ -239,13 +232,22 @@ private:
         add_ancillary_block(element, std::move(data), 1);
     }
 
+    // Spec §11.5.1: bounds equal to the default range [0, 2^k - 1] of an unsigned integer image should not be
+    // specified, so that a model read from another encoder that wrote them reads back without them.
+    static bool is_default_range(const image_info& image)
+    {
+        image_info plain;
+        plain.sample_format = image.sample_format;
+        return image.bounds == plain.representable_range();
+    }
+
     template <typename Image>
     static void add_image_attributes(xml_element& element, const Image& image, const std::string& uuid)
     {
         add(element, "geometry", format_geometry(image.geometry));
         add(element, "sampleFormat", sample_format_name(image.sample_format));
         if constexpr (std::same_as<Image, image_info>) {
-            if (image.bounds) {
+            if (image.bounds && !is_default_range(image)) {
                 add(element, "bounds", format_double(image.bounds->lower) + ":" + format_double(image.bounds->upper));
             }
         }
@@ -406,6 +408,19 @@ void append_element(std::string& output, const xml_element& element, std::span<c
 
 } // namespace
 
+void to_little_endian(block_source& block)
+{
+    if (!block.native_order) {
+        return;
+    }
+    const std::span<const std::byte> native = block.data();
+    std::vector<std::byte> copy(native.begin(), native.end());
+    swap_byte_order(copy, block.item_size);
+    block.owned = std::move(copy);
+    block.borrowed.reset();
+    block.native_order = false;
+}
+
 header_tree build_header_tree(const unit_contents& unit, const write_options& options,
                               std::span<const std::string> uuids)
 {
@@ -436,7 +451,15 @@ std::vector<xml_element> property_elements(std::span<const property> properties)
     std::vector<xml_element> elements;
     elements.reserve(properties.size());
     for (const property& item : properties) {
-        elements.push_back(builder.property_element(item));
+        xml_element element = builder.property_element(item);
+        // The index of a block of this builder would name a block of the unit, or none.
+        if (element.block) {
+            throw validation_error(errc::invalid_metadata,
+                                   "the value of the property " + item.id +
+                                       " needs a data block, which the metadata that the writer generates cannot have",
+                                   {.element = "/xisf/Metadata/Property[@id='" + item.id + "']", .attribute = "value"});
+        }
+        elements.push_back(std::move(element));
     }
     return elements;
 }

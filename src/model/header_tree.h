@@ -23,6 +23,10 @@
 
 namespace openxisf::detail {
 
+/// The longest String written as character data, 1 MiB. A longer one is written in a data block, since readers limit
+/// the size of a header (64 MiB by default in OpenXISF), and a data block is read within the limits of loaded data.
+inline constexpr std::size_t max_character_data = std::size_t{1} << 20;
+
 /// An element of a header, with its attributes and character data as plain text, escaped when the header is written.
 struct xml_element
 {
@@ -35,7 +39,8 @@ struct xml_element
     std::optional<std::size_t> block{};
 };
 
-/// The data of a block to write, in little-endian byte order (spec §10.4).
+/// The data of a block to write, in little-endian byte order (spec §10.4), once to_little_endian() has copied those
+/// that a big-endian host borrows in its own order.
 struct block_source
 {
     /// The data, when they are borrowed: the pixel data of the caller, or of a thumbnail of the model.
@@ -46,12 +51,20 @@ struct block_source
     std::size_t item_size = 1;
     /// True for a block written in the header, as Base64, and false for an attached one.
     bool inline_data = false;
+    /// True when borrowed holds numbers of item_size bytes in the byte order of a big-endian host, which
+    /// to_little_endian() swaps in a copy before the block is written.
+    bool native_order = false;
 
     [[nodiscard]] std::span<const std::byte> data() const noexcept
     {
         return borrowed ? *borrowed : std::span<const std::byte>(owned);
     }
 };
+
+/// Gives a block whose data are in native_order a copy of them in little-endian byte order, which it then holds. Other
+/// blocks are left as they are. The writer copies the pixel data so only once the unit has passed the checks of its
+/// size, so that a unit refused for its size costs no copy. When the copy throws, the block is left as it was.
+void to_little_endian(block_source& block);
 
 /// The header of a unit, but for the metadata that the writer generates and the attributes of the data blocks.
 struct header_tree
@@ -71,7 +84,9 @@ struct header_tree
 [[nodiscard]] header_tree build_header_tree(const unit_contents& unit, const write_options& options,
                                             std::span<const std::string> uuids);
 
-/// The Property elements of properties whose values need no data block, such as the generated metadata.
+/// The Property elements of the metadata that the writer generates, which are written with the data blocks of a unit
+/// and so cannot have one of their own. Throws validation_error with errc::invalid_metadata for a value that needs a
+/// data block: a vector, a matrix, or a String longer than max_character_data or that XML cannot hold.
 [[nodiscard]] std::vector<xml_element> property_elements(std::span<const property> properties);
 
 /// What the header says about a data block: where it is, and how it is encoded (spec §10.3 to §10.6).

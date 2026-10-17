@@ -10,6 +10,7 @@
 #include <openxisf/image.h>
 #include <openxisf/io.h>
 #include <openxisf/property.h>
+#include <openxisf/reader.h>
 #include <openxisf/writer.h>
 
 #include "core/scratch_buffer.h"
@@ -25,6 +26,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -89,6 +91,9 @@ struct model
         image.bounds = openxisf::bounds{.lower = 0.0, .upper = 1.0};
         image.id = "first";
         image.properties.set("Instrument:ExposureTime", 300.0F);
+        image.properties.set("Image:FrameNumber", std::uint32_t{1});
+        image.properties.set("Image:GroupId", "M42_2026-10.L");
+        image.properties.set("Image:SubgroupId", "9");
         image.tables.push_back({.id = "Table",
                                 .fields = {{.id = "number", .type = openxisf::property_type::uint8},
                                            {.id = "name", .type = openxisf::property_type::string}},
@@ -244,6 +249,37 @@ std::vector<rule> rules()
          .code = errc::reserved_property_type,
          .element = image + "/Property[@id='Instrument:ExposureTime']",
          .attribute = "type"},
+        // The values of the Image namespace (spec §11.5.3.5).
+        {.name = "frame_number_zero",
+         .breaks = [](model& unit) { first(unit).properties.set("Image:FrameNumber", std::uint32_t{0}); },
+         .code = errc::invalid_property,
+         .element = image + "/Property[@id='Image:FrameNumber']",
+         .attribute = "value"},
+        {.name = "group_identifier_with_a_space",
+         .breaks = [](model& unit) { first(unit).properties.set("Image:GroupId", "M42 L"); },
+         .code = errc::invalid_property,
+         .element = image + "/Property[@id='Image:GroupId']",
+         .attribute = "value"},
+        {.name = "group_identifier_starting_with_a_hyphen",
+         .breaks = [](model& unit) { first(unit).properties.set("Image:GroupId", "-M42"); },
+         .code = errc::invalid_property,
+         .element = image + "/Property[@id='Image:GroupId']",
+         .attribute = "value"},
+        {.name = "empty_subgroup_identifier",
+         .breaks = [](model& unit) { first(unit).properties.set("Image:SubgroupId", ""); },
+         .code = errc::invalid_property,
+         .element = image + "/Property[@id='Image:SubgroupId']",
+         .attribute = "value"},
+        {.name = "subgroup_without_a_group",
+         .breaks = [](model& unit) { first(unit).properties.erase("Image:GroupId"); },
+         .code = errc::invalid_property,
+         .element = image + "/Property[@id='Image:SubgroupId']",
+         .attribute = "id"},
+        {.name = "thumbnail_frame_number_zero",
+         .breaks = [](model& unit) { small(unit).properties.set("Image:FrameNumber", std::uint32_t{0}); },
+         .code = errc::invalid_property,
+         .element = image + "/Thumbnail/Property[@id='Image:FrameNumber']",
+         .attribute = "value"},
         {.name = "string_not_utf8",
          .breaks = [](model& unit) { unit.properties.set("Test:String", "\xC3("); },
          .code = errc::invalid_utf8,
@@ -691,6 +727,12 @@ std::vector<rule> rules()
              },
          .code = errc::invalid_thumbnail,
          .element = image + "/Thumbnail"},
+        {.name = "thumbnail_beyond_2_64_bytes",
+         .breaks =
+             [](model& unit) { small(unit).geometry.dimensions = {std::uint64_t{1} << 32, std::uint64_t{1} << 32}; },
+         .code = errc::invalid_geometry,
+         .element = image + "/Thumbnail",
+         .attribute = "geometry"},
         {.name = "thumbnail_pixel_data",
          .breaks = [](model& unit) { small(unit).pixels.pop_back(); },
          .code = errc::pixel_data_size_mismatch,
@@ -751,6 +793,49 @@ TEST(conformance_writer_validation, the_metadata_that_the_writer_writes_itself_i
     unit.metadata.set("XISF:CreationTime", "2026-10-04T12:00:00Z");
     unit.metadata.set("XISF:CompressionLevel", "\x01");
     EXPECT_NO_THROW(save(unit));
+}
+
+TEST(conformance_writer_validation, a_creator_application_longer_than_1_mib_is_refused)
+{
+    // The writer writes the metadata that it generates in the header, which has no data block for them, while a String
+    // longer than 1 MiB goes to a data block. The creator application then named a block of the unit: the pixel data of
+    // an image, the value of an inline property, or none, which crashed the save.
+    image_info image;
+    image.geometry = {.dimensions = {4, 4}, .channels = 1};
+    const std::vector<std::byte> pixels(image.data_size(), std::byte{'Z'});
+    const auto writer_of = [&image, &pixels](const std::string& application, std::string_view blocks) {
+        openxisf::write_options options = model{}.options;
+        options.creator_application = application;
+        openxisf::writer output(options);
+        if (blocks == "attached") {
+            (void)output.add_image(image, pixels);
+        } else if (blocks == "inline") {
+            output.properties().set("Test:Vector", std::vector<std::uint8_t>{'h', 'i', '!'});
+        }
+        return output;
+    };
+    const std::string longest = "MyCapture 2.1 " + std::string((std::size_t{1} << 20) - 14, 'a');
+    for (const std::string_view blocks : {"attached", "inline", "none"}) {
+        SCOPED_TRACE(blocks);
+        openxisf::memory_sink written;
+        writer_of(longest, blocks).save(written);
+        const openxisf::reader file(std::make_unique<openxisf::memory_source>(written.release()));
+        const property* application = file.metadata().find("XISF:CreatorApplication");
+        ASSERT_NE(application, nullptr);
+        // Compared as a whole: a message with the two values would hold 1 MiB.
+        EXPECT_TRUE(application->value == property_value(longest)) << "another creator application was read back";
+
+        openxisf::memory_sink refused;
+        try {
+            writer_of(longest + "a", blocks).save(refused);
+            ADD_FAILURE() << "the unit was written";
+        } catch (const openxisf::validation_error& failure) {
+            EXPECT_EQ(failure.code(), errc::invalid_metadata) << failure.what();
+            EXPECT_EQ(failure.context().element, "/xisf/Metadata/Property[@id='XISF:CreatorApplication']");
+            EXPECT_EQ(failure.context().attribute, "value");
+        }
+        EXPECT_EQ(refused.position(), 0U);
+    }
 }
 
 TEST(conformance_writer_validation, strings_that_xml_cannot_hold_are_valid_values)

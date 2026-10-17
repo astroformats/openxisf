@@ -21,6 +21,16 @@ namespace openxisf::detail {
 /// directory cannot be found, or its path is not valid UTF-8.
 [[nodiscard]] std::string absolute_path(const std::string& path);
 
+/// Throws io_error with errc::not_a_regular_file when what the absolute path names is something that a file must not
+/// replace: a directory, a FIFO, a socket or a device, which on Windows includes a device name such as NUL in any
+/// directory. A link, a symbolic link or a junction on Windows, is not followed, since a file that replaces it replaces
+/// the link alone. Nothing at path, and what cannot be looked at, is left to create_new() and commit(), which fail
+/// where the system refuses them.
+void check_replaceable(const std::string& path);
+
+/// True when path names a directory, or a link to one. False when it names something else, or cannot be looked at.
+[[nodiscard]] bool is_directory(const std::string& path);
+
 /// A file of the operating system, closed on destruction. Reads and writes take explicit offsets, so that any number
 /// of threads can read one file at once.
 class native_file
@@ -34,7 +44,10 @@ public:
     static constexpr handle_type closed_handle = -1;
 #endif
 
-    /// Opens a regular file for reading. Throws io_error with errc::open_failed or errc::not_a_regular_file.
+    /// Opens a regular file for reading. What the system tells is not one is refused before it is opened, since opening
+    /// a device can act on it: on Windows a device name that the system makes a path of its device namespace, such as
+    /// NUL in any directory, and on POSIX systems what stat() does not call a regular file. Throws io_error with
+    /// errc::open_failed or errc::not_a_regular_file, which a directory, the root of a drive or a share included, is.
     [[nodiscard]] static native_file open_for_reading(const std::string& path);
 
     /// Creates a file for writing, or returns nothing when something exists at path already. name is the path of the
@@ -45,7 +58,8 @@ public:
     /// of what it found: absolute, with every symbolic link resolved (and every junction, on Windows), as the system
     /// names it. On POSIX systems the result holds that path alone, and no file. Throws io_error with
     /// errc::open_failed when nothing is there or the path cannot be resolved, and on Windows with
-    /// errc::not_a_regular_file for a device, which has no such path.
+    /// errc::not_a_regular_file for a device, which has no such path; a device name is refused so before it is opened,
+    /// as open_for_reading() refuses it.
     [[nodiscard]] static native_file find(const std::string& path);
 
     native_file(native_file&& other) noexcept

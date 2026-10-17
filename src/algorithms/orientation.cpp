@@ -16,9 +16,9 @@ namespace openxisf {
 
 namespace {
 
-void check_two_dimensional(const openxisf::geometry& geometry)
+void check_two_dimensional(const geometry& size)
 {
-    if (geometry.dimensions.size() != 2) {
+    if (size.dimensions.size() != 2) {
         throw usage_error(errc::invalid_argument, "an orientation applies to two-dimensional images");
     }
 }
@@ -61,21 +61,21 @@ std::pair<std::size_t, std::size_t> turned_position(orientation turn, std::size_
 
 } // namespace
 
-openxisf::geometry oriented_geometry(const openxisf::geometry& geometry, orientation turn)
+geometry oriented_geometry(const geometry& size, orientation turn)
 {
-    check_two_dimensional(geometry);
-    openxisf::geometry result = geometry;
+    check_two_dimensional(size);
+    geometry result = size;
     if (exchanges_axes(turn)) {
         std::swap(result.dimensions[0], result.dimensions[1]);
     }
     return result;
 }
 
-std::vector<std::byte> orient_pixels(std::span<const std::byte> pixels, const openxisf::geometry& geometry,
-                                     std::size_t sample_size, pixel_storage storage, orientation turn)
+std::vector<std::byte> orient_pixels(std::span<const std::byte> pixels, const geometry& size, std::size_t sample_size,
+                                     pixel_storage storage, orientation turn)
 {
-    check_two_dimensional(geometry);
-    const std::uint64_t samples = geometry.sample_count();
+    check_two_dimensional(size);
+    const std::uint64_t samples = size.sample_count();
     if (sample_size == 0 || samples > std::numeric_limits<std::uint64_t>::max() / sample_size ||
         samples * sample_size != pixels.size()) {
         throw usage_error(errc::invalid_argument, "the pixel data do not hold the samples of the geometry");
@@ -83,11 +83,11 @@ std::vector<std::byte> orient_pixels(std::span<const std::byte> pixels, const op
     if (pixels.empty()) {
         return {};
     }
-    const std::size_t width = geometry.dimensions[0];
-    const std::size_t height = geometry.dimensions[1];
+    const std::size_t width = size.dimensions[0];
+    const std::size_t height = size.dimensions[1];
     const std::size_t turned_width = exchanges_axes(turn) ? height : width;
     // What moves as one: a sample of one channel in planar storage, the samples of a whole pixel in normal storage.
-    const std::size_t planes = storage == pixel_storage::planar ? geometry.channels : 1;
+    const std::size_t planes = storage == pixel_storage::planar ? size.channels : 1;
     const std::size_t unit = pixels.size() / planes / width / height;
     const std::size_t plane_size = width * height * unit;
     std::vector<std::byte> result(pixels.size());

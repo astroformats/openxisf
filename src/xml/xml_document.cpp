@@ -10,6 +10,7 @@
 #include "core/utf8.h"
 
 #include <algorithm>
+#include <array>
 #include <new>
 #include <string>
 #include <utility>
@@ -113,11 +114,13 @@ bool is_declaration(std::string_view text) noexcept
 // character_reference() gives it: those of character data and attribute values, and of the pseudo-attributes of an
 // XML declaration. References in comments, CDATA sections and other processing instructions are text. A tag, and an
 // XML declaration, is passed over to its first '>' outside quoted attribute values, so that what an attribute value
-// holds, such as "<!--", is part of the value.
+// holds, such as "<!--", is part of the value. Each search stops where its region ends, so that a header of many
+// comments is not searched to its end for each of them.
 template <typename Visit> void for_each_character_reference(std::string_view text, Visit visit)
 {
     const auto visit_between = [text, &visit](std::size_t from, std::size_t to) {
-        for (std::size_t i = from; (i = text.find("&#", i)) < to; i += 2) {
+        const std::string_view region = text.substr(0, to);
+        for (std::size_t i = from; (i = region.find("&#", i)) != std::string_view::npos; i += 2) {
             if (const std::optional<std::uint32_t> value = character_reference(text, i)) {
                 visit(i, *value);
             }
@@ -275,6 +278,49 @@ void check_tree(const pugi::xml_document& document, std::uint64_t offset, const 
     }
 }
 
+void append_utf8(std::string& text, std::uint32_t code_point)
+{
+    if (code_point < 0x80) {
+        text += static_cast<char>(code_point);
+    } else if (code_point < 0x800) {
+        text += static_cast<char>(0xC0 | (code_point >> 6));
+        text += static_cast<char>(0x80 | (code_point & 0x3F));
+    } else if (code_point < 0x10000) {
+        text += static_cast<char>(0xE0 | (code_point >> 12));
+        text += static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+        text += static_cast<char>(0x80 | (code_point & 0x3F));
+    } else {
+        text += static_cast<char>(0xF0 | (code_point >> 18));
+        text += static_cast<char>(0x80 | ((code_point >> 12) & 0x3F));
+        text += static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+        text += static_cast<char>(0x80 | (code_point & 0x3F));
+    }
+}
+
+// Appends what the reference at text[start], a '&', stands for to data, as pugixml replaces it: a predefined entity or
+// a character reference; anything else, such as an entity that cannot be declared, is left as written. Returns where
+// the text after it starts. The values of character references were checked by parse_xml().
+std::size_t append_reference(std::string& data, std::string_view text, std::size_t start)
+{
+    static constexpr std::array<std::pair<std::string_view, char>, 5> entities{
+        {{"&lt;", '<'}, {"&gt;", '>'}, {"&amp;", '&'}, {"&apos;", '\''}, {"&quot;", '"'}}};
+    const std::string_view rest = text.substr(start);
+    for (const auto& [entity, character] : entities) {
+        if (rest.starts_with(entity)) {
+            data += character;
+            return start + entity.size();
+        }
+    }
+    if (rest.starts_with("&#")) {
+        if (const std::optional<std::uint32_t> value = character_reference(text, start)) {
+            append_utf8(data, *value);
+            return text.find(';', start) + 1;
+        }
+    }
+    data += '&';
+    return start + 1;
+}
+
 } // namespace
 
 std::size_t past(std::string_view text, std::size_t from, std::string_view terminator) noexcept
@@ -371,6 +417,66 @@ std::string character_data(const pugi::xml_node& element)
         }
     }
     return text;
+}
+
+std::string character_data(const pugi::xml_node& element, std::string_view text)
+{
+    const std::optional<std::size_t> start = element_offset(element);
+    if (!start) {
+        return character_data(element);
+    }
+    const std::optional<std::size_t> start_tag_end = tag_end(text, *start);
+    if (!start_tag_end || text[*start_tag_end - 1] == '/') {
+        return character_data(element);
+    }
+    // The end tag starts at the last "</" of the element.
+    const std::size_t end = *start + element_length(text, *start);
+    const std::size_t content_start = *start_tag_end + 1;
+    const std::string_view content = text.substr(content_start, text.rfind("</", end - 1) - content_start);
+    if (content.find("<!--") == std::string_view::npos && content.find("<?") == std::string_view::npos &&
+        content.find("<![CDATA[") == std::string_view::npos) {
+        return character_data(element);
+    }
+
+    std::string data;
+    // Line ends are normalized before anything else (XML 1.0, End-of-Line Handling), in CDATA sections too.
+    const auto append_normalized = [&data](std::string_view part) {
+        for (std::size_t i = 0; i < part.size(); ++i) {
+            if (part[i] != '\r') {
+                data += part[i];
+            } else {
+                data += '\n';
+                if (i + 1 < part.size() && part[i + 1] == '\n') {
+                    ++i;
+                }
+            }
+        }
+    };
+    std::size_t i = 0;
+    while (i < content.size()) {
+        const std::size_t markup = std::min(content.find_first_of("<&", i), content.size());
+        append_normalized(content.substr(i, markup - i));
+        i = markup;
+        if (i == content.size()) {
+            break;
+        }
+        const std::string_view rest = content.substr(i);
+        if (rest.starts_with("<!--")) {
+            i = past(content, i + 4, "-->");
+        } else if (rest.starts_with("<![CDATA[")) {
+            const std::size_t close = std::min(content.find("]]>", i + 9), content.size());
+            append_normalized(content.substr(i + 9, close - (i + 9)));
+            i = past(content, close, "]]>");
+        } else if (rest.starts_with("<?")) {
+            i = past(content, i + 2, "?>");
+        } else if (rest.starts_with("<")) {
+            // A child element, whose character data are its own.
+            i += element_length(content, i);
+        } else {
+            i = append_reference(data, content, i);
+        }
+    }
+    return data;
 }
 
 std::optional<std::size_t> element_offset(const pugi::xml_node& element) noexcept

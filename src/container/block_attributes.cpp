@@ -77,14 +77,15 @@ std::optional<codec_entry> codec_named(std::string_view name) noexcept
     return std::nullopt;
 }
 
-// The parts of text between separators: one more than there are separators.
-std::vector<std::string_view> split(std::string_view text, char separator)
+// The first parts of text between separators, up to one more than most: enough to tell a value of more parts than its
+// form has, however many, without storing them.
+std::vector<std::string_view> split(std::string_view text, char separator, std::size_t most)
 {
     std::vector<std::string_view> parts;
     for (;;) {
         const std::size_t end = text.find(separator);
         parts.push_back(text.substr(0, end));
-        if (end == std::string_view::npos) {
+        if (end == std::string_view::npos || parts.size() > most) {
             return parts;
         }
         text.remove_prefix(end + 1);
@@ -152,7 +153,7 @@ block_location parse_location(std::string_view text)
         return {.kind = location_kind::inline_data, .encoding = parse_encoding(text.substr(prefix.size()))};
     }
     if (constexpr std::string_view prefix = "attachment:"; text.starts_with(prefix)) {
-        const std::vector<std::string_view> parts = split(text.substr(prefix.size()), ':');
+        const std::vector<std::string_view> parts = split(text.substr(prefix.size()), ':', 2);
         if (parts.size() != 2) {
             throw_invalid_location(text, "does not have the form attachment:position:size");
         }
@@ -232,7 +233,7 @@ bool is_codec_name(std::string_view name) noexcept
 
 block_compression parse_compression(std::string_view text)
 {
-    const std::vector<std::string_view> parts = split(text, ':');
+    const std::vector<std::string_view> parts = split(text, ':', 3);
     const std::optional<codec_entry> found = codec_named(parts.front());
     if (!found) {
         if (parts.front().empty()) {
@@ -263,19 +264,34 @@ block_compression parse_compression(std::string_view text)
 
 std::vector<subblock> parse_subblocks(std::string_view text)
 {
-    std::vector<subblock> subblocks;
-    for (const std::string_view pair : split(text, ':')) {
-        const std::vector<std::string_view> sizes = split(pair, ',');
-        if (sizes.size() != 2) {
-            throw invalid_data_error(errc::invalid_subblocks, "the subblocks " + quote(text) +
-                                                                  " are not compressed,uncompressed pairs separated "
-                                                                  "by colons");
+    // Each pair is read twice: once to check them all and count them, then into a list of that size, so that a value
+    // that is not a list of subblocks takes no memory, and a list as long as a header takes that of its subblocks.
+    const auto for_each_pair = [text](auto visit) {
+        for (std::size_t start = 0;;) {
+            const std::size_t end = text.find(':', start);
+            const std::string_view pair =
+                text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
+            const std::size_t comma = pair.find(',');
+            if (comma == std::string_view::npos || pair.find(',', comma + 1) != std::string_view::npos) {
+                throw invalid_data_error(errc::invalid_subblocks, "the subblocks " + quote(text) +
+                                                                      " are not compressed,uncompressed pairs "
+                                                                      "separated by colons");
+            }
+            visit(subblock{.compressed_size = parse_part(pair.substr(0, comma), errc::invalid_subblocks, "subblocks",
+                                                         text, "compressed size"),
+                           .uncompressed_size = parse_part(pair.substr(comma + 1), errc::invalid_subblocks, "subblocks",
+                                                           text, "uncompressed size")});
+            if (end == std::string_view::npos) {
+                return;
+            }
+            start = end + 1;
         }
-        subblocks.push_back(
-            {.compressed_size = parse_part(sizes[0], errc::invalid_subblocks, "subblocks", text, "compressed size"),
-             .uncompressed_size =
-                 parse_part(sizes[1], errc::invalid_subblocks, "subblocks", text, "uncompressed size")});
-    }
+    };
+    std::size_t count = 0;
+    for_each_pair([&count](const subblock&) { ++count; });
+    std::vector<subblock> subblocks;
+    subblocks.reserve(count);
+    for_each_pair([&subblocks](const subblock& part) { subblocks.push_back(part); });
     return subblocks;
 }
 
