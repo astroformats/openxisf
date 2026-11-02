@@ -168,7 +168,7 @@ block_checksum checksum_of(hash_algorithm algorithm, std::span<const std::byte> 
 }
 
 // An inline block, encoded whole: compressed when that makes it smaller (spec §10.6), with the checksum of its stored
-// bytes (spec §10.6.1), and in Base64.
+// bytes (spec §10.6.2), and in Base64.
 block_header encode_inline(const block_source& block, const block_encoding_options& encoding)
 {
     block_header header{.inline_data = true};
@@ -266,7 +266,7 @@ private:
             } else {
                 attached_.push_back(i);
                 subblocks = checked_add(subblocks, subblock_count(tree_.blocks[i]));
-                headers_[i].size = tree_.blocks[i].data().size();
+                headers_[i].size = tree_.blocks[i].size();
                 total = checked_add(total, headers_[i].size);
             }
         }
@@ -405,10 +405,10 @@ private:
         }
     }
 
-    // The number of subblocks of a block when it is compressed, none without a codec.
+    // The number of subblocks of a block when it is compressed, none without a codec or for a reserved block.
     std::uint64_t subblock_count(const block_source& block) const
     {
-        if (!encoding_.codec) {
+        if (!encoding_.codec || block.reserved_size != 0) {
             return 0;
         }
         const std::uint64_t size = block.data().size();
@@ -483,6 +483,10 @@ private:
     {
         for (const std::size_t i : attached_) {
             const block_source& block = tree_.blocks[i];
+            if (block.reserved_size != 0) {
+                encode_reserved(headers_[i], block.reserved_size);
+                continue;
+            }
             const std::span<const std::byte> data = block.data();
             if (encoding_.codec) {
                 std::vector<std::byte> stored;
@@ -518,6 +522,50 @@ private:
         }
     }
 
+    // The zeros of a reserved block, which are never compressed, hashed before the header is written when it lists
+    // their checksum.
+    void encode_reserved(block_header& header, std::uint64_t size)
+    {
+        if (!encoding_.checksum) {
+            progress_.advance(size);
+            return;
+        }
+        hasher hash(*encoding_.checksum);
+        for (std::uint64_t done = 0; done < size;) {
+            const std::span<const std::byte> piece = zero_piece(size - done);
+            hash.update(piece);
+            done += piece.size();
+            progress_.advance(piece.size());
+        }
+        header.checksum = block_checksum{.algorithm = hash.algorithm(), .digest = hash.finish()};
+    }
+
+    // Writes the zeros of a reserved block to the sink of the blocks, in pieces, through hash when there is one.
+    void write_reserved(std::uint64_t size, std::optional<hasher>& hash)
+    {
+        for (std::uint64_t done = 0; done < size;) {
+            const std::span<const std::byte> piece = zero_piece(size - done);
+            blocks_.write(piece);
+            if (hash) {
+                hash->update(piece);
+            }
+            done += piece.size();
+            progress_.advance(piece.size());
+        }
+    }
+
+    // The first size zeros of a piece, of piece_size bytes at most, which the reserved blocks of the save share: no
+    // buffer of the size of a block is allocated.
+    std::span<const std::byte> zero_piece(std::uint64_t size)
+    {
+        // Assigned rather than cast: std::size_t is std::uint64_t on some platforms and not on others.
+        const std::size_t length = std::min<std::uint64_t>(size, piece_size);
+        if (zero_piece_.size() < length) {
+            zero_piece_.resize(length);
+        }
+        return std::span<const std::byte>(zero_piece_).first(length);
+    }
+
     // The unit in order, when the place of every block is known: the length of the header is found by fixed-point
     // iteration, since the decimal positions of the blocks change it. It grows at each step, as the positions do, and
     // stops once the header fits in front of the blocks.
@@ -544,6 +592,12 @@ private:
     {
         for (const std::size_t i : attached_) {
             write_zeros(blocks_, headers_[i].position - blocks_.position());
+            if (tree_.blocks[i].reserved_size != 0) {
+                // Hashed already, when the header lists a checksum.
+                std::optional<hasher> none;
+                write_reserved(tree_.blocks[i].reserved_size, none);
+                continue;
+            }
             const std::span<const std::byte> stored =
                 buffers_[i].empty() ? tree_.blocks[i].data() : std::span<const std::byte>(buffers_[i]);
             for (std::size_t offset = 0; offset < stored.size(); offset += piece_size) {
@@ -612,7 +666,7 @@ private:
     {
         const std::uint64_t size = block.data().size();
         block_header header{.position = unknown, .size = unknown};
-        if (encoding_.codec) {
+        if (encoding_.codec && block.reserved_size == 0) {
             const compression_options options = compression_for(*encoding_.codec, encoding_, block);
             block_compression compression{
                 .codec = options.codec, .uncompressed_size = size, .item_size = options.item_size};
@@ -632,8 +686,8 @@ private:
     }
 
     // Completes the header of a block of data whose subblocks were compressed into stored bytes, hashed by hash: the
-    // block is stored compressed when that makes it smaller, and as it is otherwise (spec §10.6), with the checksum of
-    // what is stored. Returns whether it is stored compressed.
+    // block is stored compressed when that makes it smaller, and as it is otherwise (spec §10.6.1), with the checksum
+    // of what is stored. Returns whether it is stored compressed.
     bool settle_compression(block_header& header, std::span<const std::byte> data, std::uint64_t stored,
                             const block_compression& compression, std::optional<hasher>& hash) const
     {
@@ -657,10 +711,18 @@ private:
         block_header& header = headers_[index];
         const block_source& block = tree_.blocks[index];
         const std::span<const std::byte> data = block.data();
-        header = {.position = blocks_.position(), .size = data.size()};
+        header = {.position = blocks_.position(), .size = block.size()};
         std::optional<hasher> hash;
         if (encoding_.checksum) {
             hash.emplace(*encoding_.checksum);
+        }
+
+        if (block.reserved_size != 0) {
+            write_reserved(block.reserved_size, hash);
+            if (hash) {
+                header.checksum = block_checksum{.algorithm = hash->algorithm(), .digest = hash->finish()};
+            }
+            return;
         }
 
         if (encoding_.codec) {
@@ -717,6 +779,8 @@ private:
     std::vector<std::vector<std::byte>> buffers_{};
     // The indices of the attached blocks, in document order.
     std::vector<std::size_t> attached_{};
+    // The zeros that reserved blocks are written and hashed from, piece by piece.
+    std::vector<std::byte> zero_piece_{};
 };
 
 } // namespace

@@ -39,16 +39,21 @@ using openxisf::test::sample;
 class samples_structure : public testing::TestWithParam<sample>
 {};
 
-TEST_P(samples_structure, opens_with_an_info_about_the_type_of_its_creation_time)
+TEST_P(samples_structure, opens_without_diagnostics_but_for_the_creation_time_of_older_versions)
 {
-    // PixInsight writes XISF:CreationTime as a String; the reader reads the TimePoint that it holds.
+    // The XISF module of PixInsight 1.9.4 and 1.9.5 writes XISF:CreationTime as a String, and the reader reads the
+    // TimePoint that it holds, with an info; that of 1.9.6 writes the TimePoint of spec §11.4.1.
     const openxisf::reader file(openxisf::test::sample_path(GetParam()));
 
     EXPECT_EQ(file.storage(), openxisf::unit_storage::monolithic);
     EXPECT_EQ(file.signature(), openxisf::signature_status::none);
-    EXPECT_TRUE(openxisf::test::single_diagnostic(file.diagnostics(), openxisf::severity::info,
-                                                  openxisf::errc::reserved_property_type,
-                                                  openxisf::test::creation_time_path));
+    if (GetParam().creation_time_as_string) {
+        EXPECT_TRUE(openxisf::test::single_diagnostic(file.diagnostics(), openxisf::severity::info,
+                                                      openxisf::errc::reserved_property_type,
+                                                      openxisf::test::creation_time_path));
+    } else {
+        EXPECT_TRUE(openxisf::test::no_diagnostics(file.diagnostics()));
+    }
     EXPECT_EQ(file.metadata().at("XISF:CreationTime").value.type(), openxisf::property_type::time_point);
 }
 
@@ -57,7 +62,7 @@ TEST_P(samples_structure, has_the_metadata_of_pixinsight)
     const openxisf::reader file(openxisf::test::sample_path(GetParam()));
     const openxisf::property_list& metadata = file.metadata();
     EXPECT_EQ(metadata.at("XISF:CreatorApplication").value, openxisf::property_value(GetParam().application));
-    EXPECT_EQ(metadata.at("XISF:CreatorModule").value, openxisf::property_value("XISF module version 1.1.3"));
+    EXPECT_EQ(metadata.at("XISF:CreatorModule").value, openxisf::property_value(GetParam().module));
     EXPECT_EQ(metadata.at("XISF:CreatorOS").value, openxisf::property_value("Windows"));
     // The creation time is of the day the samples were written.
     EXPECT_EQ(metadata.at("XISF:CreationTime").value.get<openxisf::date_time>().year, 2026);
@@ -70,7 +75,7 @@ TEST_P(samples_structure, has_the_elements_that_pixinsight_wrote)
     openxisf::detail::diagnostic_log log(true);
     const openxisf::detail::unit_header found = openxisf::detail::read_unit_header(source, {}, log);
     const openxisf::detail::parsed_header header = openxisf::detail::parse_header(found.text, found.offset, {}, log);
-    const openxisf::detail::unit_outline outline = openxisf::detail::build_outline(header.root, log);
+    const openxisf::detail::unit_outline outline = openxisf::detail::build_outline(header.root, {}, log);
 
     std::vector<std::string> paths;
     paths.reserve(outline.elements.size());

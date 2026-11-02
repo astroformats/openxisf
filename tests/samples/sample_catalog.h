@@ -33,6 +33,11 @@ struct sample
     std::vector<std::string> blocks{};
     /// The value of XISF:CreatorApplication.
     std::string_view application = "PixInsight 1.9.4";
+    /// The value of XISF:CreatorModule.
+    std::string_view module = "XISF module version 1.1.3";
+    /// Whether PixInsight wrote XISF:CreationTime as a String, as the XISF module of 1.9.4 and 1.9.5 does, rather
+    /// than as the TimePoint of spec §11.4.1, which that of 1.9.6 writes.
+    bool creation_time_as_string = true;
 };
 
 /// Every sample.
@@ -47,8 +52,8 @@ struct sample
 /// The sample with the given id. Throws std::logic_error when there is none.
 [[nodiscard]] const sample& sample_by_id(std::string_view id);
 
-/// The path of the XISF:CreationTime property in every sample, which PixInsight writes as a String rather than as the
-/// TimePoint of spec §11.4.1, so that each sample has an info diagnostic about it.
+/// The path of the XISF:CreationTime property in every sample, which PixInsight before 1.9.6 writes as a String rather
+/// than as the TimePoint of spec §11.4.1, so that each such sample has an info diagnostic about it.
 inline constexpr std::string_view creation_time_path = "/xisf/Metadata[1]/Property[1]";
 
 /// The diagnostics of a sample, without the info that every sample has about the type of its XISF:CreationTime.

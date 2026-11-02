@@ -134,6 +134,90 @@ bool reads_pixels_through_the_library()
     return false;
 }
 
+// The regions of interest across the boundary: a region whose samples an exported member counts, read as values of
+// its sample format by a template that calls into the library, and with a pitch into memory of the application.
+bool reads_regions_through_the_library()
+{
+    const openxisf::reader file(unit_of(
+        R"(<?xml version="1.0" encoding="UTF-8"?><xisf version="1.0" xmlns="http://www.pixinsight.com/xisf"><Metadata>)"
+        R"(<Property id="XISF:CreationTime" type="TimePoint" value="2026-10-03T12:00:00Z"/>)"
+        R"(<Property id="XISF:CreatorApplication" type="String">consumer 1.0</Property></Metadata>)"
+        R"(<Image geometry="3:2:1" sampleFormat="UInt16" location="embedded">)"
+        R"(<Data encoding="hex">010002000300040005000600</Data></Image></xisf>)"));
+    const openxisf::pixel_region region{.origin = {1, 0}, .size = {2, 2}};
+    if (!file.diagnostics().empty() || region.sample_count(file.image(0).geometry) != 4 ||
+        file.read_pixels<std::uint16_t>(0, {.region = region}) != std::vector<std::uint16_t>{2, 3, 5, 6}) {
+        return false;
+    }
+    std::vector<std::uint16_t> tile(5, 0xFFFF);
+    file.read_pixels(0, std::span(tile), {.region = region, .pitch = 3});
+    return tile == std::vector<std::uint16_t>{2, 3, 0xFFFF, 5, 6};
+}
+
+// A device of the application over its own buffer, whose virtual functions the library calls across the boundary.
+class buffer_device final : public openxisf::random_access_device
+{
+public:
+    explicit buffer_device(std::vector<std::byte>& bytes) : bytes_(bytes) {}
+
+    std::uint64_t size() const override
+    {
+        return bytes_.size();
+    }
+
+    void read(std::uint64_t offset, std::span<std::byte> destination) const override
+    {
+        std::copy_n(bytes_.begin() + static_cast<std::ptrdiff_t>(offset), destination.size(), destination.begin());
+    }
+
+    void write(std::uint64_t offset, std::span<const std::byte> data) override
+    {
+        std::ranges::copy(data, bytes_.begin() + static_cast<std::ptrdiff_t>(offset));
+        ++writes_;
+    }
+
+    int writes() const noexcept
+    {
+        return writes_;
+    }
+
+private:
+    std::vector<std::byte>& bytes_;
+    int writes_ = 0;
+};
+
+// The editor across the boundary: a reserved image with a checksum, filled through a device of the application and
+// through one of the library, committed, and verified by a reader.
+bool edits_units_through_the_library()
+{
+    openxisf::image_info info;
+    info.geometry = {.dimensions = {3, 2}, .channels = 1};
+    openxisf::writer output({.creator_application = "consumer 1.0", .checksum = openxisf::checksum_algorithm::sha1});
+    output.add_reserved_image(info);
+    openxisf::memory_sink sink;
+    output.save(sink);
+    std::vector<std::byte> unit = sink.release();
+
+    const std::vector<std::uint16_t> row{7, 8, 9};
+    auto device = std::make_unique<buffer_device>(unit);
+    const buffer_device& counted = *device;
+    {
+        openxisf::editor edit(std::move(device));
+        edit.write_pixels(0, std::span(row), {.region = openxisf::pixel_region{.origin = {0, 1}, .size = {3, 1}}});
+        edit.commit();
+        if (counted.writes() != 2) {
+            return false;
+        }
+    }
+    {
+        openxisf::editor edit(std::make_unique<openxisf::memory_device>(unit));
+        edit.write_pixels(0, std::span(row), {.region = openxisf::pixel_region{.origin = {0, 0}, .size = {3, 1}}});
+        edit.commit();
+    }
+    const openxisf::reader file(std::make_unique<openxisf::memory_source>(std::move(unit)), {.strict = true});
+    return file.read_pixels<std::uint16_t>(0) == std::vector<std::uint16_t>{7, 8, 9, 7, 8, 9};
+}
+
 // The elements that describe images across the boundary: keywords, a thumbnail and a table in the types of the
 // library, a header-only open, and the loader, which changes the reader through an exported member.
 bool reads_descriptions_through_the_library()
@@ -167,7 +251,7 @@ bool reads_descriptions_through_the_library()
 }
 
 // The writer across the boundary: a unit written into a sink of the library, a typed image, which calls an exported
-// member from a template, and a validation error caught by its type.
+// member from a template, how the reader finds its block stored, and a validation error caught by its type.
 bool writes_through_the_library()
 {
     openxisf::writer output({.creator_application = "consumer 1.0",
@@ -183,6 +267,12 @@ bool writes_through_the_library()
     output.save(sink);
     const openxisf::reader file(std::make_unique<openxisf::memory_source>(sink.release()), {.strict = true});
     if (file.read_pixels<std::uint16_t>(0) != samples || file.image(0).properties != info.properties) {
+        return false;
+    }
+    // Twelve bytes that Zstandard does not make smaller are stored as they are, with their checksum.
+    const openxisf::block_info block = file.block(0);
+    if (block.location != openxisf::block_location::attachment || block.codec.has_value() ||
+        block.checksum != openxisf::checksum_algorithm::sha1 || block.uncompressed_size != 12) {
         return false;
     }
     try {
@@ -327,6 +417,10 @@ int main()
             std::cerr << "the images of the library do not read as expected\n";
             return 1;
         }
+        if (!reads_regions_through_the_library()) {
+            std::cerr << "the regions of images of the library do not read as expected\n";
+            return 1;
+        }
         if (!reads_properties_through_the_library()) {
             std::cerr << "the properties of the library do not read as expected\n";
             return 1;
@@ -341,6 +435,10 @@ int main()
         }
         if (!reads_distributed_units_through_the_library()) {
             std::cerr << "the distributed units of the library do not read as expected\n";
+            return 1;
+        }
+        if (!edits_units_through_the_library()) {
+            std::cerr << "the editor of the library does not write units as expected\n";
             return 1;
         }
         if (!runs_the_algorithms_through_the_library()) {

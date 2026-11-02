@@ -19,17 +19,33 @@ namespace openxisf::detail {
 class thread_safe_source
 {
 public:
-    /// Takes the source, and asks it for its size and description once. Throws usage_error when source is null.
-    explicit thread_safe_source(std::unique_ptr<input_source> source);
+    /// Takes the source, and asks it for its size, its bytes in memory and its description once. Throws usage_error
+    /// when source is null, or when it gives bytes in memory of another size than its own. shared_with_writers says
+    /// that other threads may write bytes of the source while it is read (see shared_with_writers()).
+    explicit thread_safe_source(std::unique_ptr<input_source> source, bool shared_with_writers = false);
 
     [[nodiscard]] std::uint64_t size() const noexcept
     {
         return size_;
     }
 
+    /// The content of the source in memory, as input_source::bytes() gives it, which any number of threads may read at
+    /// once; empty when it is read through read() alone.
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept
+    {
+        return bytes_;
+    }
+
     [[nodiscard]] const std::string& description() const noexcept
     {
         return description_;
+    }
+
+    /// True when other threads may write bytes of the source while it is read, as they may write the device of an
+    /// editor: a read of a region then reads the bytes of its runs alone, never through the bytes between them.
+    [[nodiscard]] bool shared_with_writers() const noexcept
+    {
+        return shared_with_writers_;
     }
 
     /// Reads like input_source::read(). A read beyond the size is an io_error with errc::end_of_data, which the source
@@ -39,8 +55,10 @@ public:
 private:
     std::unique_ptr<input_source> source_;
     std::uint64_t size_;
+    std::span<const std::byte> bytes_;
     std::string description_;
     bool concurrent_;
+    bool shared_with_writers_;
     mutable std::mutex mutex_;
 };
 

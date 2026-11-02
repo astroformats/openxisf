@@ -86,6 +86,11 @@ const image_info& reader::image(std::size_t index) const
     return detail::image_at(*state_, index);
 }
 
+block_info reader::block(std::size_t index) const
+{
+    return detail::block_of(*state_, index);
+}
+
 std::vector<std::byte> reader::read_pixels(std::size_t index, const pixel_read_options& options) const
 {
     return detail::read_pixels(*state_, index, options);
@@ -99,6 +104,11 @@ void reader::read_pixels(std::size_t index, std::span<std::byte> destination, co
 std::size_t reader::sample_count_of(std::size_t index, sample_format format) const
 {
     return detail::typed_sample_count(*state_, index, format);
+}
+
+std::size_t reader::sample_count_of(std::size_t index, sample_format format, const pixel_read_options& options) const
+{
+    return detail::typed_sample_count(*state_, index, format, options);
 }
 
 void reader::check_sample_format(std::size_t index, sample_format format) const

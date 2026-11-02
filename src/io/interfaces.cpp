@@ -21,6 +21,11 @@ std::string input_source::description() const
     return {};
 }
 
+std::span<const std::byte> input_source::bytes() const
+{
+    return {};
+}
+
 output_sink::~output_sink() = default;
 
 bool output_sink::can_rewrite() const
@@ -34,5 +39,14 @@ void output_sink::rewrite(std::uint64_t /*offset*/, std::span<const std::byte> /
 }
 
 void output_sink::finish() {}
+
+random_access_device::~random_access_device() = default;
+
+void random_access_device::flush() {}
+
+bool random_access_device::supports_concurrent_writes() const
+{
+    return false;
+}
 
 } // namespace openxisf

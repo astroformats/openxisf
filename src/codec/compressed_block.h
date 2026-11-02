@@ -30,7 +30,7 @@ namespace openxisf::detail {
 
 /// The subblocks of a compressed block of stored_size bytes: those of compression, or a single one for the whole block
 /// when it has none. A subblock whose compressed and uncompressed sizes are equal holds its data as they are, not
-/// compressed: the specification does not say so, but PixInsight writes such subblocks when they do not compress.
+/// compressed, and one longer than its data is decompressed (spec §10.6.1, Revision 2).
 /// Throws invalid_data_error with errc::invalid_subblocks when the sizes do not add up to the stored and the
 /// uncompressed size of the block, when a compressed subblock is larger than the decoder of the codec takes (LZ4
 /// decodes at most 2^31 - 1 bytes, compressed or not), or when it declares more bytes than the codec can decode from
@@ -40,6 +40,12 @@ namespace openxisf::detail {
 
 /// Checks the subblocks of a compressed block as subblocks_of() does, without a copy of them.
 void check_subblocks(const block_compression& compression, std::uint64_t stored_size);
+
+/// Throws limit_error with errc::zstd_expansion_too_large when a Zstandard block of stored_size bytes without
+/// subblocks, or one of its subblocks, declares more than max_expansion times its compressed size
+/// (limits::max_zstd_expansion). Does nothing for other codecs, and for a max_expansion of 0. The
+/// subblocks are those that check_subblocks() accepts.
+void check_zstd_expansion(const block_compression& compression, std::uint64_t stored_size, std::uint64_t max_expansion);
 
 /// Called after each subblock is decompressed with the uncompressed bytes done so far, on the calling thread. It may
 /// throw to stop the decompression; the exception passes through.
@@ -63,6 +69,38 @@ using subblock_progress = std::function<void(std::uint64_t done)>;
 void decompress_block_into(std::span<const std::byte> stored, const block_compression& compression,
                            const limits& limits, std::span<std::byte> destination,
                            const subblock_progress& progress = {});
+
+/// Subblocks of a compressed block that follow each other: the index of the first and their number, and where their
+/// bytes start and how many there are, stored and uncompressed.
+struct subblock_span
+{
+    std::size_t first = 0;
+    std::size_t count = 0;
+    std::uint64_t stored_offset = 0;
+    std::uint64_t stored_size = 0;
+    std::uint64_t offset = 0;
+    std::uint64_t size = 0;
+
+    friend bool operator==(const subblock_span&, const subblock_span&) = default;
+};
+
+/// Tells whether the uncompressed bytes [first, end) of a block hold any that a read needs.
+using needed_bytes = std::function<bool(std::uint64_t first, std::uint64_t end)>;
+
+/// The subblocks of a compressed block of stored_size bytes, checked as subblocks_of() checks them, whose uncompressed
+/// bytes a read needs, which needed tells for each subblock in order: in spans of at most most_count subblocks that
+/// follow each other, of at most most_size uncompressed bytes unless a single subblock has more. A block without
+/// subblocks is a single one.
+[[nodiscard]] std::vector<subblock_span> covering_subblocks(const block_compression& compression,
+                                                            std::uint64_t stored_size, const needed_bytes& needed,
+                                                            std::size_t most_count, std::uint64_t most_size);
+
+/// Decompresses the subblocks of span, a span of covering_subblocks(), from their stored bytes, stored, into data,
+/// which has their uncompressed size, as decompress_block() decompresses the subblocks of a block, with progress
+/// counting the bytes of data; byte shuffling is not reversed. Throws what decompress_block() throws for them.
+void decompress_subblocks_into(std::span<const std::byte> stored, const block_compression& compression,
+                               const subblock_span& span, const limits& limits, std::span<std::byte> data,
+                               const subblock_progress& progress = {});
 
 /// How compress_block() compresses a block.
 struct compression_options
@@ -100,10 +138,10 @@ using subblock_store = std::function<void(std::span<const std::byte> stored, con
 /// which takes up to about twice that with the shuffled copies and the output of the codec, besides a state of the
 /// codec for each subblock of a batch, which at the highest Zstandard levels is many times a subblock of a few MiB.
 /// Each state is made once for the block and kept from one batch to the next. A subblock that does not get smaller is
-/// stored as it is, with equal sizes (see subblocks_of()), as PixInsight stores it: PixInsight takes any subblock that
-/// is not smaller than its data for data stored as they are, so it would misread codec output that is. Returns how the
-/// block is compressed, with every subblock listed, even a single one. Throws usage_error with errc::invalid_argument
-/// for an invalid level, what the codec adapters throw, and what store throws.
+/// stored as it is, with equal sizes (see subblocks_of()), as spec §10.6.1 requires; PixInsight 1.9.5 took any
+/// subblock that is not smaller than its data for data stored as they are, so it misread codec output that is. Returns
+/// how the block is compressed, with every subblock listed, even a single one. Throws usage_error with
+/// errc::invalid_argument for an invalid level, what the codec adapters throw, and what store throws.
 block_compression compress_subblocks(std::span<const std::byte> data, const compression_options& options,
                                      const subblock_store& store);
 

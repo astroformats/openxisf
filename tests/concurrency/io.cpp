@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Ezequiel Ruiz
 
-// Reads from 16 threads at once, on sources that support concurrent reads and on sources that the library serializes.
-// ThreadSanitizer runs these tests in CI.
+// Reads from 16 threads at once, on sources that support concurrent reads and on sources that the library serializes,
+// and reads and writes of devices. ThreadSanitizer runs these tests in CI.
 
 #include <openxisf/io.h>
 #include <openxisf/stream_io.h>
 
 #include "core/xoshiro.h"
+#include "io/thread_safe_device.h"
 #include "io/thread_safe_source.h"
 #include "support/bytes.h"
 #include "support/cursor_source.h"
@@ -94,6 +95,62 @@ TEST(concurrency_io, a_source_without_concurrent_reads_is_called_one_read_at_a_t
 
     EXPECT_EQ(read_from_threads(source, data), 0);
     EXPECT_FALSE(cursor.overlapped());
+}
+
+// Every thread writes ranges of its own stripe of the device, of thread_count stripes, with bytes of its own, and reads
+// each range back. Returns the number of wrong reads, failed reads and writes included; the device then holds the last
+// bytes written in each stripe, which content follows.
+template <typename Device> int write_from_threads(Device& device, std::vector<std::byte>& content)
+{
+    const std::size_t stripe = content.size() / thread_count;
+    std::atomic<int> wrong{0};
+    openxisf::test::run_threads(thread_count, [&device, &content, stripe, &wrong](std::size_t t) {
+        openxisf::detail::xoshiro256starstar random({4, 5, 6, t + 1});
+        std::vector<std::byte> data;
+        std::vector<std::byte> read;
+        for (int i = 0; i < reads_per_thread; ++i) {
+            const std::size_t offset = t * stripe + (random() % stripe);
+            const std::size_t length = random() % std::min(max_read, ((t + 1) * stripe) - offset);
+            data.assign(length, static_cast<std::byte>(random()));
+            read.resize(length);
+            try {
+                device.write(offset, data);
+                device.read(offset, read);
+                // Each thread has its own stripe of content.
+                std::ranges::copy(data, content.begin() + static_cast<std::ptrdiff_t>(offset));
+                if (read != data) {
+                    ++wrong;
+                }
+            } catch (const std::exception&) {
+                ++wrong;
+            }
+        }
+    });
+    return wrong;
+}
+
+TEST(concurrency_io, file_device)
+{
+    const temp_directory directory;
+    std::vector<std::byte> content = pattern(std::size_t{1} << 20);
+    openxisf::test::write_file(directory.path() / "data.bin", content);
+    const std::string path = directory.file("data.bin");
+
+    openxisf::file_device direct(path);
+    EXPECT_EQ(write_from_threads(direct, content), 0);
+    const openxisf::detail::thread_safe_device wrapped(std::make_unique<openxisf::file_device>(path));
+    EXPECT_EQ(write_from_threads(wrapped, content), 0);
+    EXPECT_EQ(read_from_threads(wrapped, content), 0);
+}
+
+TEST(concurrency_io, memory_device)
+{
+    std::vector<std::byte> buffer = pattern(std::size_t{1} << 20);
+    std::vector<std::byte> content = buffer;
+    openxisf::memory_device device(buffer);
+
+    EXPECT_EQ(write_from_threads(device, content), 0);
+    EXPECT_EQ(buffer, content);
 }
 
 TEST(concurrency_io, stream_sources)

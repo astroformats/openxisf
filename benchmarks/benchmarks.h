@@ -33,7 +33,9 @@ enum class samples
 void register_block_benchmarks();
 
 /// Whole units: the header of a unit with many properties and keywords, pixel reads against raw reads of the same
-/// bytes, storage conversion, checksummed reads, and a 100 MiB frame read and written in subblocks.
+/// bytes, storage conversion, checksummed reads, a 100 MiB frame read and written in subblocks, and regions of
+/// interest: tiles read from memory, from files and around the cache of the system, the tile of a stacking of 32
+/// frames, and an editor filling a frame tile by tile.
 void register_unit_benchmarks();
 
 } // namespace openxisf::bench

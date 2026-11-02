@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Ezequiel Ruiz
 
-// Spec §10.5 and §10.6.1: the checksums of data blocks, verified before a block is used. On constructed units whose
+// Spec §10.5 and §10.6.2: the checksums of data blocks, verified before a block is used. On constructed units whose
 // blocks hold "abc", with the digests of the NIST examples.
 
 #include <openxisf/error.h>
@@ -188,7 +188,7 @@ TEST(conformance_checksum, the_attached_block_of_a_property_is_verified_when_the
 
 TEST(conformance_checksum, the_digest_of_a_compressed_block_is_computed_over_the_compressed_bytes)
 {
-    // Spec §10.6.1. The stored bytes "abc" stand for the compressed pixels of a row of 100. A digest that fails is
+    // Spec §10.6.2. The stored bytes "abc" stand for the compressed pixels of a row of 100. A digest that fails is
     // detected when the stored bytes are read, so they never reach a decompressor.
     const auto image = [](std::string_view attributes, std::string_view content = {}) {
         return R"(<Image geometry="100:1:1" sampleFormat="UInt8" colorSpace="Gray" )" + std::string(attributes) + ">" +

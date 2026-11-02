@@ -5,10 +5,10 @@
 // little-endian byte order; the rest is a data blocks file.
 //
 // Its block index is read for those identifiers: it gives elements of those identifiers only, or throws the error of
-// an invalid file or of the node limit. Then a header file whose images name the file with each identifier, and once as
-// a whole, is opened with a resolver that serves it, and every image whose block is available reads exactly the bytes
-// its index element points to; every other block fails with the error that was reported. Any other exception escapes
-// and fails the run.
+// an invalid file or of the limits of nodes and elements. Then a header file whose images name the file with each
+// identifier, and once as a whole, is opened with a resolver that serves it, and every image whose block is available
+// reads exactly the bytes its index element points to; every other block fails with the error that was reported. Any
+// other exception escapes and fails the run.
 
 #include <openxisf/error.h>
 #include <openxisf/io.h>
@@ -41,7 +41,9 @@ void require(bool condition)
     }
 }
 
-constexpr openxisf::limits small_limits{.max_allocation = std::uint64_t{1} << 20, .max_index_nodes = 64};
+// Limits that inputs reach, above the 1,100 elements of the largest seed.
+constexpr openxisf::limits small_limits{
+    .max_allocation = std::uint64_t{1} << 20, .max_index_nodes = 64, .max_index_elements = 1'200};
 
 struct fuzz_input
 {
@@ -89,7 +91,8 @@ void read_index(const fuzz_input& input)
     } catch (const openxisf::invalid_data_error& failure) {
         require(failure.code() == openxisf::errc::invalid_blocks_file);
     } catch (const openxisf::limit_error& failure) {
-        require(failure.code() == openxisf::errc::too_many_index_nodes);
+        require(failure.code() == openxisf::errc::too_many_index_nodes ||
+                failure.code() == openxisf::errc::too_many_index_elements);
     }
 }
 

@@ -24,13 +24,13 @@
 
 namespace openxisf {
 
-/// The compression codecs of data blocks (spec §10.6.3 to §10.6.10).
+/// The compression codecs of data blocks (spec §10.6.4 to §10.6.11).
 enum class codec : std::uint8_t
 {
     zlib,  ///< zlib (RFC 1950).
     lz4,   ///< LZ4, in its block format: the fastest.
     lz4hc, ///< LZ4 blocks written by LZ4 HC: smaller, written more slowly, read as fast.
-    zstd,  ///< Zstandard: the codec that the specification recommends. Only decoders of Revision 1 read it.
+    zstd,  ///< Zstandard: the codec that the specification recommends. Only decoders of Revision 1 or later read it.
 };
 
 /// The name of a codec in the specification: "zlib", "lz4", "lz4hc" or "zstd".
@@ -71,27 +71,31 @@ struct write_options
     /// fixed time, save() writes a model the same way, byte for byte, every time, but for the new UUIDs of
     /// generate_uuids. The units of save_distributed() differ every time: the identifiers of their blocks are random.
     std::optional<date_time> creation_time{};
-    /// Compress the data blocks with this codec; none when empty. A block that the codec does not make smaller is
-    /// written uncompressed.
+    /// Compress the data blocks with this codec, in subblocks of subblock_size; none when empty. A block that the codec
+    /// does not make smaller is written uncompressed.
     std::optional<openxisf::codec> codec{};
     /// The compression level (spec §11.4.2): from 1, the least compression, to 100, the most, or 0 for the default of
     /// the codec. The levels of each codec map linearly onto 1 to 100, as the specification asks, so for zlib, whose
     /// levels are 0 to 9, levels 1 to 6 are its level 0, which does not compress: the blocks are then written
     /// uncompressed. LZ4 has no levels.
     int compression_level = 0;
-    /// Shuffle the bytes of each block of multibyte numbers before it is compressed (spec §10.6.2), which helps pixel
+    /// Shuffle the bytes of each block of multibyte numbers before it is compressed (spec §10.6.3), which helps pixel
     /// data. It applies with a codec only.
     bool byte_shuffle = false;
     /// The largest piece of a compressed block, before compression, in bytes: a block is divided into subblocks of this
     /// size, which decoders can decompress in parallel, and which OpenXISF built with oneTBB compresses and
     /// decompresses in parallel; each thread then holds the state of its codec, which at the highest Zstandard levels
-    /// takes many times a subblock of a few MiB. Subblocks of 1 to 4 MiB cost little: on a 100 MiB image the
-    /// compression ratio stays within 0.3% of that of a single block. With 0, blocks are divided only where a codec
-    /// requires it. A subblock that the codec does not make smaller is stored as it is, with equal compressed and
-    /// uncompressed sizes, as PixInsight stores and reads such subblocks; decoders that know only the specification may
-    /// not read them.
-    std::uint64_t subblock_size = 0;
-    /// Give each data block a checksum with this algorithm; none when empty.
+    /// takes many times a subblock of a few MiB. 4 MiB by default, as PixInsight writes since its version 1.9.6:
+    /// subblocks of 1 to 4 MiB cost little, on a 100 MiB image the compression ratio stays within 0.3% of that of a
+    /// single block, and a reader decodes only the subblocks that hold a region (pixel_read_options::region). With 0,
+    /// blocks are divided only where a codec requires it, and Zstandard requires it nowhere, so a reader decodes a
+    /// whole block to read any region of it. A subblock that the codec does not make smaller is stored as it is, with
+    /// equal compressed and uncompressed sizes, as spec §10.6.1 (Revision 2) requires; decoders of earlier revisions
+    /// may not read such a subblock, so a unit meant for them is written with 0. A whole block that does not
+    /// compress is written uncompressed, which every decoder reads.
+    std::uint64_t subblock_size = std::uint64_t{4} << 20;
+    /// Give each data block a checksum with this algorithm; none when empty. A checksum covers its whole block, so a
+    /// reader that verifies it reads a whole image to read any region of it (pixel_read_options::verify_checksum).
     std::optional<checksum_algorithm> checksum{};
     /// Give each image without a UUID a new version 4 UUID.
     bool generate_uuids = false;
@@ -139,7 +143,8 @@ struct write_options
 /// since readers limit the size of a header (limits::max_header_size, 64 MiB by default). The writer checks the
 /// specification, not the other limits of readers: a unit whose header has more elements than
 /// limits::max_xml_elements, 1,000,000 by default, as a table of a few hundred thousand rows has, is read back only
-/// with that limit raised (read_options::limits).
+/// with that limit raised (read_options::limits), and one of more images, properties, keywords and the like than
+/// limits::max_model_objects, also 1,000,000 by default, only with that one raised too.
 ///
 /// A model read from a unit is accepted as it is when the reader gave no warning, but for an image that a Reference
 /// lists again, which has the id of the image it copies, and a TimePoint whose instant in UTC is beyond the years 0 to
@@ -152,7 +157,8 @@ struct write_options
 /// naming the object, for the first violation. The properties of an astrometric solution are the exception: the writer
 /// checks their types, as those of any reserved property, and keeps them as given, without checking the solution that
 /// they make, such as a distortion model of one direction alone (astrometric_solution). The pixel data are borrowed:
-/// they must stay valid and unchanged until the last save(). A writer is thread-compatible, like a standard container:
+/// they must stay valid and unchanged until the last save(). A reserved image has none: its zeros are written for an
+/// editor to fill in place (add_reserved_image()). A writer is thread-compatible, like a standard container:
 /// save() can run on several threads at once, and a change needs exclusive access. It can be moved, and a moved-from
 /// writer can only be destroyed or assigned to.
 class OPENXISF_API writer
@@ -193,9 +199,7 @@ public:
     /// @throws usage_error when pixels does not have info.data_size() bytes.
     std::size_t add_image(image_info info, std::span<const std::byte> pixels);
 
-    /// Adds an image with its samples as values of T, the type of its sample format (sample_format_of<T>()). T is not
-    /// deduced from a span of samples that are not const, such as std::span(samples) of a std::vector<float> that is
-    /// not const: give it as std::span<const float>(samples).
+    /// Adds an image with its samples as values of T, the type of its sample format (sample_format_of<T>()).
     /// @throws usage_error when T is another type, or samples does not hold the samples of the image.
     template <pixel_sample T> std::size_t add_image(image_info info, std::span<const T> samples)
     {
@@ -203,13 +207,30 @@ public:
         return add_image(std::move(info), std::as_bytes(samples));
     }
 
+    /// Adds an image with samples that are not const, such as std::span(samples) of a std::vector<float> that is not
+    /// const, as the overload for const samples does.
+    template <pixel_sample T> std::size_t add_image(image_info info, std::span<T> samples)
+    {
+        return add_image(std::move(info), std::span<const T>(samples));
+    }
+
+    /// Adds an image after the others whose pixel data are zeros, without data in memory: room that an editor fills in
+    /// place, region by region (editor::write_pixels()), so that an output such as a stacked frame is written once, its
+    /// regions as they are computed, without holding it whole. Its data block is attached, uncompressed and unshuffled
+    /// whatever the options say, since its data come later, and written in pieces of a few MiB; with
+    /// write_options::checksum it gets the checksum of its zeros, which editor::commit() replaces with that of the data
+    /// written. Returns the index of the image.
+    /// @throws usage_error (errc::arithmetic_overflow) when info.data_size() does not fit in 64 bits.
+    std::size_t add_reserved_image(image_info info);
+
     /// The images added so far, in order.
     [[nodiscard]] std::span<const image_info> images() const noexcept;
 
-    /// Writes the unit to the file at path, which is UTF-8 on every platform and ends with .xisf (spec §9.6). The file
-    /// is replaced as file_sink replaces it, only once it is complete: a failed or cancelled save leaves the old file,
-    /// or none.
-    /// @throws usage_error when path is empty, not valid UTF-8, or does not end with .xisf in any case.
+    /// Writes the unit to the file at path, which is UTF-8 on every platform. The application names the file: spec §9.6
+    /// requires a monolithic file to end with .xisf, and the writer takes any name, so that a unit can be written under
+    /// another one, such as a temporary name that the application renames into place. The file is replaced as file_sink
+    /// replaces it, only once it is complete: a failed or cancelled save leaves the old file, or none.
+    /// @throws usage_error when path is empty or not valid UTF-8.
     /// @throws validation_error when the unit violates the specification; nothing is written then.
     /// @throws io_error when the file cannot be written, when path names a directory, a FIFO, a socket or a device
     ///         (errc::not_a_regular_file, see file_sink), or when the system provides no random data for the name of

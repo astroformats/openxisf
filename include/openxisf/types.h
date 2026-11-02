@@ -13,8 +13,8 @@
 #include <vector>
 
 /// @file
-/// The types that describe images: sample formats, colour spaces, storage models, image types, orientations, geometry
-/// and bounds (spec §8.5, §11.5).
+/// The types that describe images: sample formats, colour spaces, storage models, image types, orientations, geometry,
+/// regions of interest and bounds (spec §8.5, §11.5).
 
 namespace openxisf {
 
@@ -270,6 +270,33 @@ struct geometry
     [[nodiscard]] OPENXISF_API std::uint64_t sample_count() const;
 
     friend bool operator==(const geometry&, const geometry&) = default;
+};
+
+/// A region of interest of an image: a box of pixels, from an origin and of a size along each axis, and a range of
+/// channels, which reader::read_pixels() reads alone (pixel_read_options::region), and editor::write_pixels() writes
+/// (pixel_write_options::region). It has no steps: an application that subsamples an image subsamples what it reads.
+struct pixel_region
+{
+    /// The coordinates of the first pixel of the box, one for each axis, in the order of geometry::dimensions; empty
+    /// for 0 along every axis.
+    std::vector<std::uint64_t> origin{};
+    /// The lengths of the box along each axis, in pixels, in the same order; empty for every pixel from the origin to
+    /// the end of each axis, so that a region without origin and size covers the whole image.
+    std::vector<std::uint64_t> size{};
+    /// The first channel of the region.
+    std::uint64_t first_channel = 0;
+    /// The number of channels of the region, from first_channel on; 0 for every channel from first_channel on.
+    std::uint64_t channel_count = 0;
+
+    /// The number of samples of the region in an image of geometry image: the number of pixels of its box times its
+    /// number of channels.
+    /// @throws usage_error (errc::invalid_argument) when the region does not lie within the image: an origin or a size
+    ///         that has entries, but not one for each axis, a length of 0, a box that goes past the end of an axis, or
+    ///         channels beyond the last.
+    /// @throws usage_error (errc::arithmetic_overflow) when the count does not fit in 64 bits.
+    [[nodiscard]] OPENXISF_API std::uint64_t sample_count(const geometry& image) const;
+
+    friend bool operator==(const pixel_region&, const pixel_region&) = default;
 };
 
 /// The representable range of an image (spec §8.5.5): the sample values shown as black and as white.

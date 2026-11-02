@@ -41,15 +41,13 @@ TEST(diagnostic_log, records_every_diagnostic_in_order)
 }
 
 // A header can hold a million problems, each of which would cost a diagnostic.
-TEST(diagnostic_log, lists_ten_thousand_diagnostics_the_last_of_which_counts_those_that_follow)
+TEST(diagnostic_log, lists_as_many_diagnostics_as_its_cap_the_last_of_which_counts_those_that_follow)
 {
-    constexpr std::size_t listed = 10'000;
-    diagnostic_log log(false);
-    for (std::size_t i = 1; i < listed; ++i) {
-        log.info(errc::unknown_element, "an info", {.element = "/xisf/x:Extension[" + std::to_string(i) + "]"});
-    }
+    diagnostic_log log(false, 3);
+    log.info(errc::unknown_element, "an info", {.element = "/xisf/x:Extension[1]"});
+    log.info(errc::unknown_element, "an info", {.element = "/xisf/x:Extension[2]"});
     log.warning(errc::invalid_uid, "the last diagnostic", {.element = "/xisf/Image[1]", .attribute = "uid"});
-    ASSERT_EQ(log.entries().size(), listed);
+    ASSERT_EQ(log.entries().size(), 3U);
     EXPECT_EQ(log.entries().back().message, "the last diagnostic");
 
     // The last one stands for itself and those after it: their number, the severity of the most serious, and the code
@@ -59,13 +57,43 @@ TEST(diagnostic_log, lists_ten_thousand_diagnostics_the_last_of_which_counts_tho
     log.warning(errc::invalid_uid, "a warning");
     log.error(errc::dangling_reference, "another error");
     const std::vector<openxisf::diagnostic> diagnostics = log.release();
-    ASSERT_EQ(diagnostics.size(), listed);
-    EXPECT_EQ(diagnostics[listed - 2].context.element, "/xisf/x:Extension[9999]");
+    ASSERT_EQ(diagnostics.size(), 3U);
+    EXPECT_EQ(diagnostics[1].context.element, "/xisf/x:Extension[2]");
     const openxisf::diagnostic& last = diagnostics.back();
     EXPECT_EQ(last.severity, severity::error);
     EXPECT_EQ(last.code, errc::duplicate_uid);
     EXPECT_EQ(last.message, "5 more problems were found, which are not listed");
     EXPECT_EQ(last.context, openxisf::error_context{});
+}
+
+// With a cap of one, the only diagnostic stands for every problem once there are two.
+TEST(diagnostic_log, a_cap_of_one_lists_one_diagnostic)
+{
+    diagnostic_log log(false, 1);
+    log.warning(errc::invalid_uid, "a warning", {.element = "/xisf/Image[1]", .attribute = "uid"});
+    ASSERT_EQ(log.entries().size(), 1U);
+    EXPECT_EQ(log.entries().front().message, "a warning");
+
+    log.info(errc::unknown_element, "an info");
+    const std::vector<openxisf::diagnostic> diagnostics = log.release();
+    ASSERT_EQ(diagnostics.size(), 1U);
+    EXPECT_EQ(diagnostics.front().severity, severity::warning);
+    EXPECT_EQ(diagnostics.front().code, errc::invalid_uid);
+    EXPECT_EQ(diagnostics.front().message, "2 problems were found, which are not listed");
+    EXPECT_EQ(diagnostics.front().context, openxisf::error_context{});
+}
+
+TEST(diagnostic_log, a_cap_of_zero_lists_every_diagnostic)
+{
+    constexpr std::size_t count = 20'000;
+    diagnostic_log log(false, 0);
+    for (std::size_t i = 0; i < count; ++i) {
+        log.info(errc::unknown_element, "an info", {.element = "/xisf/x:Extension[" + std::to_string(i + 1) + "]"});
+    }
+    const std::vector<openxisf::diagnostic> diagnostics = log.release();
+    ASSERT_EQ(diagnostics.size(), count);
+    EXPECT_EQ(diagnostics.back().message, "an info");
+    EXPECT_EQ(diagnostics.back().context.element, "/xisf/x:Extension[20000]");
 }
 
 TEST(diagnostic_log, an_error_throws_in_strict_mode)
@@ -96,7 +124,8 @@ TEST(diagnostic_log, the_exception_of_an_error_says_what_kind_of_failure_it_is)
     }
     for (const errc code : {errc::header_too_large, errc::xml_too_deep, errc::too_many_xml_elements,
                             errc::allocation_too_large, errc::zstd_window_too_large, errc::ancillary_data_too_large,
-                            errc::too_many_index_nodes, errc::too_many_external_files}) {
+                            errc::too_many_index_nodes, errc::too_many_external_files, errc::too_many_index_elements,
+                            errc::too_many_model_objects, errc::zstd_expansion_too_large}) {
         EXPECT_TRUE(throws<openxisf::limit_error>(code, [code] { throw_unit_error(code, "message", {}); }));
     }
     // The external files of a distributed unit that cannot be opened or read.

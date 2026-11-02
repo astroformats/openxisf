@@ -83,6 +83,19 @@ struct restricted_character
 /// does not end.
 [[nodiscard]] std::optional<std::size_t> tag_end(std::string_view text, std::size_t start) noexcept;
 
+/// A part of a text: where it starts, and its length.
+struct text_span
+{
+    std::size_t offset = 0;
+    std::size_t length = 0;
+};
+
+/// Where the value of the attribute name is written in the start tag that starts at text[start], a '<': between its
+/// quotes, as written, before references are replaced. Empty when the tag has no attribute of that name, or ends
+/// before it. The name is compared as written, prefix included.
+[[nodiscard]] std::optional<text_span> attribute_text(std::string_view text, std::size_t start,
+                                                      std::string_view name) noexcept;
+
 /// The length of the element that starts at text[start], from its '<' to the end of its end tag, found by the nesting
 /// of its tags; comments, CDATA sections and processing instructions are skipped. In a document that parse_xml()
 /// accepted, that is the element. In other text it is where the element would end by its tags alone, whatever their

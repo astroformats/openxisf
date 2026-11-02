@@ -11,7 +11,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -36,42 +38,35 @@ struct index_problem
     error_origin origin{};
 };
 
+// The files of the available external blocks of blocks, in the order of the first block that names each.
+std::vector<external_file> group_files(const std::vector<data_block>& blocks)
+{
+    std::vector<external_file> files;
+    std::unordered_map<std::string, std::size_t> by_location;
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        const std::optional<block_descriptor>& descriptor = blocks[i].descriptor;
+        if (!descriptor || !is_external(descriptor->location.kind)) {
+            continue;
+        }
+        external_reference reference = reference_of(descriptor->location);
+        const auto [found, added] = by_location.try_emplace(location_text(reference), files.size());
+        if (added) {
+            files.push_back({.reference = std::move(reference)});
+        }
+        files[found->second].blocks.push_back(i);
+    }
+    return files;
+}
+
 class external_locator
 {
 public:
     external_locator(std::vector<data_block>& blocks, const external_resolver& resolver, const limits& limits,
-                     diagnostic_log& log)
-        : blocks_(blocks), resolver_(resolver), limits_(limits), log_(log)
+                     diagnostic_log& log, const external_sources& opened)
+        : blocks_(blocks), resolver_(resolver), limits_(limits), log_(log), opened_(opened)
     {}
 
-    void locate()
-    {
-        const std::vector<external_file> files = group();
-        for (std::size_t number = 0; number < files.size(); ++number) {
-            locate_file(files[number], number);
-        }
-    }
-
-private:
-    std::vector<external_file> group() const
-    {
-        std::vector<external_file> files;
-        std::unordered_map<std::string, std::size_t> by_location;
-        for (std::size_t i = 0; i < blocks_.size(); ++i) {
-            const std::optional<block_descriptor>& descriptor = blocks_[i].descriptor;
-            if (!descriptor || !is_external(descriptor->location.kind)) {
-                continue;
-            }
-            external_reference reference = reference_of(descriptor->location);
-            const auto [found, added] = by_location.try_emplace(location_text(reference), files.size());
-            if (added) {
-                files.push_back({.reference = std::move(reference)});
-            }
-            files[found->second].blocks.push_back(i);
-        }
-        return files;
-    }
-
+    // Locates the blocks of file, the file of that number in the order of group_files().
     void locate_file(const external_file& file, std::size_t number)
     {
         if (limits_.max_external_files != 0 && number >= limits_.max_external_files) {
@@ -118,9 +113,13 @@ private:
         return ids;
     }
 
+private:
     // The file of the blocks, or null when it cannot be opened, which fails each of them.
     std::shared_ptr<const thread_safe_source> open(const external_file& file)
     {
+        if (const auto found = opened_.find(location_text(file.reference)); found != opened_.end()) {
+            return found->second;
+        }
         const std::string name = quote(file.reference.location);
         if (!resolver_) {
             fail_all(file, errc::unsupported_location,
@@ -192,10 +191,14 @@ private:
         }
         // The subblocks must account for every byte of the block, now that its stored size is known (spec §10.6).
         if (const std::optional<block_compression>& compression = descriptor.compression) {
+            const char* attribute = compression->subblocks.empty() ? "compression" : "subblocks";
             try {
                 check_subblocks(*compression, location.size);
+                check_zstd_expansion(*compression, location.size, limits_.max_zstd_expansion);
             } catch (const invalid_data_error& failure) {
-                const char* attribute = compression->subblocks.empty() ? "compression" : "subblocks";
+                fail(block, failure.code(), failure.what(), attribute);
+                return;
+            } catch (const limit_error& failure) {
                 fail(block, failure.code(), failure.what(), attribute);
                 return;
             }
@@ -299,7 +302,27 @@ private:
     const external_resolver& resolver_;
     const limits& limits_;
     diagnostic_log& log_;
+    const external_sources& opened_;
 };
+
+constexpr std::size_t no_file = std::numeric_limits<std::size_t>::max();
+
+// Spec §11.5: makes the located block of the pixel data of an image unavailable when its data are not expected bytes,
+// the size that the geometry and the sample format of the image give; 0 for a block of anything else.
+void check_pixel_size(data_block& block, std::uint64_t expected)
+{
+    if (!block.descriptor || expected == 0 || data_size(*block.descriptor) == expected) {
+        return;
+    }
+    block.problem = diagnostic{.severity = severity::error,
+                               .code = errc::pixel_data_size_mismatch,
+                               .message = "the geometry and the sample format give " + std::to_string(expected) +
+                                          " bytes of pixel data, but the data block has " +
+                                          std::to_string(data_size(*block.descriptor)),
+                               .context = {.element = block.path, .attribute = "geometry"}};
+    block.origin = {};
+    block.descriptor.reset();
+}
 
 } // namespace
 
@@ -329,9 +352,98 @@ std::string location_text(const external_reference& reference)
 }
 
 void locate_external_blocks(std::vector<data_block>& blocks, const external_resolver& resolver, const limits& limits,
-                            diagnostic_log& log)
+                            diagnostic_log& log, const external_sources& opened)
 {
-    external_locator(blocks, resolver, limits, log).locate();
+    const std::vector<external_file> files = group_files(blocks);
+    external_locator locator(blocks, resolver, limits, log, opened);
+    for (std::size_t number = 0; number < files.size(); ++number) {
+        locator.locate_file(files[number], number);
+    }
+}
+
+void add_external_sources(const std::vector<data_block>& blocks, external_sources& sources)
+{
+    for (const data_block& block : blocks) {
+        if (block.descriptor && block.descriptor->external) {
+            sources.try_emplace(location_text(reference_of(block.descriptor->location)), block.descriptor->external);
+        }
+    }
+}
+
+struct deferred_external_files::state
+{
+    external_resolver resolver{};
+    openxisf::limits limits{};
+    std::vector<std::uint64_t> pixel_sizes{};
+    std::vector<external_file> files{};
+    // The number of the file of each block, no_file for a block that is not an available external block.
+    std::vector<std::size_t> file_of{};
+    // Guards what follows.
+    std::mutex mutex{};
+    // The located copy of each block of a file once the file is located.
+    std::vector<std::unique_ptr<const data_block>> located{};
+    std::vector<bool> done{};
+};
+
+deferred_external_files::deferred_external_files(const std::vector<data_block>& blocks, external_resolver resolver,
+                                                 const openxisf::limits& limits, std::vector<std::uint64_t> pixel_sizes)
+    : state_(std::make_unique<state>())
+{
+    state_->resolver = std::move(resolver);
+    state_->limits = limits;
+    state_->pixel_sizes = std::move(pixel_sizes);
+    state_->files = group_files(blocks);
+    state_->file_of.assign(blocks.size(), no_file);
+    for (std::size_t number = 0; number < state_->files.size(); ++number) {
+        for (const std::size_t i : state_->files[number].blocks) {
+            state_->file_of[i] = number;
+        }
+    }
+    state_->located.resize(blocks.size());
+    state_->done.assign(state_->files.size(), false);
+}
+
+deferred_external_files::~deferred_external_files() = default;
+
+const data_block& deferred_external_files::located(const std::vector<data_block>& blocks, std::size_t index) const
+{
+    const std::size_t number = state_->file_of[index];
+    if (number == no_file) {
+        return blocks[index];
+    }
+    const std::scoped_lock lock(state_->mutex);
+    if (!state_->done[number]) {
+        // The blocks of the file are located in copies, which nothing changes once the file is done. Their problems are
+        // their own, which a read of an unavailable one throws.
+        const external_file& file = state_->files[number];
+        std::vector<data_block> copies;
+        copies.reserve(file.blocks.size());
+        external_file local{.reference = file.reference};
+        for (const std::size_t i : file.blocks) {
+            local.blocks.push_back(copies.size());
+            copies.push_back(blocks[i]);
+        }
+        diagnostic_log log(false, 1);
+        external_locator(copies, state_->resolver, state_->limits, log, {}).locate_file(local, number);
+        for (std::size_t k = 0; k < copies.size(); ++k) {
+            check_pixel_size(copies[k], state_->pixel_sizes[file.blocks[k]]);
+        }
+        for (std::size_t k = 0; k < copies.size(); ++k) {
+            state_->located[file.blocks[k]] = std::make_unique<const data_block>(std::move(copies[k]));
+        }
+        state_->done[number] = true;
+    }
+    return *state_->located[index];
+}
+
+void deferred_external_files::add_sources(external_sources& sources) const
+{
+    const std::scoped_lock lock(state_->mutex);
+    for (const std::unique_ptr<const data_block>& block : state_->located) {
+        if (block && block->descriptor && block->descriptor->external) {
+            sources.try_emplace(location_text(reference_of(block->descriptor->location)), block->descriptor->external);
+        }
+    }
 }
 
 } // namespace openxisf::detail

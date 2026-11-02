@@ -41,6 +41,9 @@ void throw_unit_error(errc code, std::string_view message, error_context context
     case errc::ancillary_data_too_large:
     case errc::too_many_index_nodes:
     case errc::too_many_external_files:
+    case errc::too_many_index_elements:
+    case errc::too_many_model_objects:
+    case errc::zstd_expansion_too_large:
         throw limit_error(code, message, std::move(context));
     case errc::open_failed:
     case errc::not_a_regular_file:
@@ -78,7 +81,7 @@ std::vector<diagnostic> diagnostic_log::release() noexcept
 
 void diagnostic_log::add(openxisf::severity level, errc code, std::string message, error_context context)
 {
-    if (entries_.size() < max_diagnostics) {
+    if (max_diagnostics_ == 0 || entries_.size() < max_diagnostics_) {
         entries_.push_back(
             {.severity = level, .code = code, .message = std::move(message), .context = std::move(context)});
         return;
@@ -94,7 +97,9 @@ void diagnostic_log::add(openxisf::severity level, errc code, std::string messag
         last.severity = level;
         last.code = code;
     }
-    last.message = std::to_string(unlisted_) + " more problems were found, which are not listed";
+    // With a cap of one, the entry lists no problem before it.
+    last.message = std::to_string(unlisted_) + (entries_.size() == 1 ? " problems" : " more problems") +
+                   " were found, which are not listed";
 }
 
 } // namespace openxisf::detail

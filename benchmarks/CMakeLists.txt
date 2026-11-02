@@ -3,8 +3,12 @@
 
 find_package(benchmark CONFIG REQUIRED)
 
-add_executable(openxisf_benchmarks main.cpp codecs.cpp units.cpp)
+add_executable(openxisf_benchmarks main.cpp codecs.cpp units.cpp uncached_file.cpp)
 target_link_libraries(openxisf_benchmarks PRIVATE openxisf_internal benchmark::benchmark)
+# windows.h without the min and max macros, which break the standard headers included after it.
+if(WIN32)
+    target_compile_definitions(openxisf_benchmarks PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 set_target_properties(openxisf_benchmarks PROPERTIES CXX_EXTENSIONS OFF)
 openxisf_enable_warnings(openxisf_benchmarks)
 openxisf_enable_sanitizers(openxisf_benchmarks)

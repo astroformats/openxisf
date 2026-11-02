@@ -29,7 +29,9 @@
 #include <system_error>
 #include <vector>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #endif
 
@@ -74,6 +76,57 @@ void write_through_sink(const std::string& path, std::string_view content)
     sink.write(bytes(content));
     sink.finish();
 }
+
+#if defined(_WIN32)
+// A named pipe of one instance, which the first program that opens it takes: a later open fails, with ERROR_PIPE_BUSY,
+// so a test can tell that nothing opened it.
+class named_pipe
+{
+public:
+    named_pipe()
+        : name_(R"(\\.\pipe\openxisf-test-)" + std::to_string(GetCurrentProcessId()) + "-" +
+                std::to_string(GetTickCount64()))
+    {
+        server_ = CreateNamedPipeW(wide().c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE, 1, 0, 0, 0, nullptr);
+        if (server_ == INVALID_HANDLE_VALUE) {
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "cannot create a pipe");
+        }
+    }
+
+    named_pipe(const named_pipe&) = delete;
+    named_pipe& operator=(const named_pipe&) = delete;
+
+    ~named_pipe()
+    {
+        (void)CloseHandle(server_);
+    }
+
+    [[nodiscard]] const std::string& name() const noexcept
+    {
+        return name_;
+    }
+
+    // True when the pipe can still be opened, and so was never opened before; the open takes it.
+    [[nodiscard]] bool never_opened() const
+    {
+        HANDLE client = CreateFileW(wide().c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (client == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        (void)CloseHandle(client);
+        return true;
+    }
+
+private:
+    [[nodiscard]] std::wstring wide() const
+    {
+        return {name_.begin(), name_.end()};
+    }
+
+    std::string name_;
+    HANDLE server_ = INVALID_HANDLE_VALUE;
+};
+#endif
 
 TEST(file_source, reads_every_range_of_a_file)
 {
@@ -231,6 +284,23 @@ TEST(file_source, refuses_the_device_names_of_windows_in_any_directory)
         }
     }
     EXPECT_GE(devices, 2);
+}
+
+TEST(file_source, refuses_a_device_of_the_device_namespace_before_it_opens_it)
+{
+    // A path of the device namespace that no file system follows names a device, refused by its text: a named pipe,
+    // which an open would connect to, a serial port, the volume of a drive and a device of the system's namespace.
+    const temp_directory directory;
+    write_file(directory.path() / "unit.xisf", bytes("content"));
+    const std::string local = directory.file("unit.xisf");
+    const named_pipe pipe;
+    for (const std::string& path : {pipe.name(), std::string(R"(\\.\COM1)"), std::string(R"(\\.\NUL)"),
+                                    R"(\\.\)" + local.substr(0, 2), std::string(R"(\\?\GLOBALROOT\Device\Null)")}) {
+        EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&path] { file_source source(path); })) << path;
+    }
+    EXPECT_TRUE(pipe.never_opened());
+    // A drive after the prefix names a file, as without it.
+    EXPECT_EQ(read_all(file_source(R"(\\.\)" + local)), bytes("content"));
 }
 
 TEST(file_source, refuses_the_root_of_a_drive_or_a_share)
@@ -468,16 +538,14 @@ TEST(file_sink, a_write_that_fails_part_of_the_way_leaves_the_target_as_it_was)
 
 TEST(file_sink, a_finish_that_fails_removes_the_temporary_file)
 {
-    // A directory takes the place of the target once the sink is made, and no rename replaces it.
+    // A name longer than the file system takes, 255 characters or bytes, which only the rename finds out: the
+    // temporary file has a short one.
     const temp_directory directory;
-    file_sink sink(directory.file("target"));
+    file_sink sink(directory.file(std::string(300, 'a')));
     sink.write(bytes("content"));
-    std::filesystem::create_directory(directory.path() / "target");
-    write_file(directory.path() / "target" / "inside.txt", bytes("kept"));
 
     EXPECT_TRUE(throws<io_error>(errc::write_failed, [&] { sink.finish(); }));
-    EXPECT_EQ(entries(directory.path()), std::vector<std::string>{"target"});
-    EXPECT_EQ(read_file(directory.path() / "target" / "inside.txt"), "kept");
+    EXPECT_EQ(directory.entries(), 0U);
 }
 
 TEST(file_sink, nothing_can_be_written_after_finish)
@@ -641,6 +709,46 @@ TEST(file_sink, refuses_a_device_and_a_fifo)
 
     EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [] { file_sink sink("/dev/null"); }));
     EXPECT_TRUE(std::filesystem::is_character_file(std::filesystem::symlink_status("/dev/null")));
+#endif
+}
+
+#if defined(_WIN32)
+TEST(file_sink, refuses_a_device_of_the_device_namespace_before_it_opens_it)
+{
+    const named_pipe pipe;
+    EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&pipe] { file_sink sink(pipe.name()); }));
+    EXPECT_TRUE(pipe.never_opened());
+}
+
+TEST(file_sink, refuses_a_directory_that_is_a_reparse_point_of_another_kind_than_a_link)
+{
+    // Such as the placeholder of a cloud file system: only a symbolic link or a junction is replaced itself.
+    const temp_directory directory;
+    openxisf::test::create_foreign_reparse_point(directory.path() / "placeholder");
+    EXPECT_TRUE(
+        throws<io_error>(errc::not_a_regular_file, [&directory] { file_sink sink(directory.file("placeholder")); }));
+    EXPECT_EQ(entries(directory.path()), std::vector<std::string>{"placeholder"});
+}
+#endif
+
+TEST(file_sink, looks_at_its_target_again_before_it_replaces_it)
+{
+    // Another program can change the target while the unit is written: a directory made meanwhile is refused, where
+    // the rename would fail, and so is a FIFO, which the rename would replace.
+    const temp_directory directory;
+    file_sink sink(directory.file("unit.xisf"));
+    sink.write(bytes("unit"));
+    std::filesystem::create_directory(directory.path() / "unit.xisf");
+    write_file(directory.path() / "unit.xisf" / "inside.txt", bytes("kept"));
+    EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&sink] { sink.finish(); }));
+    EXPECT_EQ(entries(directory.path()), std::vector<std::string>{"unit.xisf"});
+    EXPECT_EQ(read_file(directory.path() / "unit.xisf" / "inside.txt"), "kept");
+#if !defined(_WIN32)
+    file_sink second(directory.file("fifo.xisf"));
+    ASSERT_EQ(::mkfifo(directory.file("fifo.xisf").c_str(), 0600), 0);
+    EXPECT_TRUE(throws<io_error>(errc::not_a_regular_file, [&second] { second.finish(); }));
+    EXPECT_TRUE(std::filesystem::is_fifo(std::filesystem::symlink_status(directory.path() / "fifo.xisf")));
+    EXPECT_EQ(entries(directory.path()), (std::vector<std::string>{"fifo.xisf", "unit.xisf"}));
 #endif
 }
 

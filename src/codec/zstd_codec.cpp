@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Ezequiel Ruiz
 
-// Zstandard (spec §10.6.9): exactly one frame of the Zstandard format (RFC 8878) for each subblock. Only the stable API
-// of the library is used, so that any build of it links.
+// Zstandard (spec §10.6.10): exactly one frame of the Zstandard format (RFC 8878) for each subblock. Only the stable
+// API of the library is used, so that any build of it links.
 
 #include <openxisf/error.h>
 

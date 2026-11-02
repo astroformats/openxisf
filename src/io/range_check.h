@@ -16,4 +16,8 @@ void check_read_range(std::uint64_t size, std::uint64_t offset, std::size_t leng
 /// Throws usage_error unless the length bytes at offset lie within the position bytes a sink has written.
 void check_rewrite_range(std::uint64_t position, std::uint64_t offset, std::size_t length);
 
+/// Throws usage_error unless the length bytes at offset lie within a device of size bytes, whose size a write never
+/// changes. The description names the device in the message.
+void check_write_range(std::uint64_t size, std::uint64_t offset, std::size_t length, std::string_view description);
+
 } // namespace openxisf::detail

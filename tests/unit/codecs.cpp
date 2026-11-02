@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Ezequiel Ruiz
 
-// The codec adapters, one subblock at a time (spec §10.6.3 to §10.6.10): each decoder fills its output exactly from all
+// The codec adapters, one subblock at a time (spec §10.6.4 to §10.6.11): each decoder fills its output exactly from all
 // of its input, or fails with corrupt_compressed_data. Round trips of every codec are in compressed_block.cpp; here the
 // streams are malformed, or built by hand from RFC 1950, the LZ4 block format and RFC 8878, and the encoders that keep
 // their state are compared with the libraries' own calls.

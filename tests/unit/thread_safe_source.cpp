@@ -57,23 +57,64 @@ public:
         return "the counting source";
     }
 
+    std::span<const std::byte> bytes() const override
+    {
+        ++calls_;
+        return {};
+    }
+
 private:
     int& calls_;
 };
 
-TEST(thread_safe_source, asks_the_source_for_its_size_and_description_once)
+TEST(thread_safe_source, asks_the_source_for_its_size_bytes_and_description_once)
 {
     int calls = 0;
     const thread_safe_source source(std::make_unique<counting_source>(calls));
     std::array<std::byte, 4> destination{};
-    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(calls, 3);
 
     source.read(0, destination);
     source.read(6, destination);
 
     EXPECT_EQ(source.size(), 10U);
+    EXPECT_TRUE(source.bytes().empty());
     EXPECT_EQ(source.description(), "the counting source");
-    EXPECT_EQ(calls, 4);
+    EXPECT_EQ(calls, 5);
+}
+
+TEST(thread_safe_source, gives_the_bytes_of_a_source_in_memory)
+{
+    const std::vector<std::byte> content = bytes("0123456789");
+    const thread_safe_source source(std::make_unique<openxisf::memory_source>(std::span<const std::byte>(content)));
+    EXPECT_EQ(source.bytes().data(), content.data());
+    EXPECT_EQ(source.bytes().size(), content.size());
+}
+
+// A source of 10 bytes that gives 4 in memory.
+class short_memory_source final : public openxisf::input_source
+{
+public:
+    std::uint64_t size() const override
+    {
+        return 10;
+    }
+
+    void read(std::uint64_t /*offset*/, std::span<std::byte> /*destination*/) const override {}
+
+    std::span<const std::byte> bytes() const override
+    {
+        return content_;
+    }
+
+private:
+    std::array<std::byte, 4> content_{};
+};
+
+TEST(thread_safe_source, refuses_bytes_in_memory_of_another_size_than_the_source)
+{
+    EXPECT_TRUE(throws<openxisf::usage_error>(
+        errc::invalid_argument, [] { const thread_safe_source source(std::make_unique<short_memory_source>()); }));
 }
 
 TEST(thread_safe_source, checks_reads_before_they_reach_the_source)
@@ -84,7 +125,7 @@ TEST(thread_safe_source, checks_reads_before_they_reach_the_source)
 
     EXPECT_TRUE(throws<io_error>(errc::end_of_data, [&] { source.read(7, destination); }));
     source.read(10, {});
-    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(calls, 3);
 }
 
 TEST(thread_safe_source, exceptions_of_the_source_pass_through_and_later_reads_work)

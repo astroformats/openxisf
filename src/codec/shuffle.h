@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <span>
 
-// Byte shuffling (spec §10.6.2). A block of n items of s bytes each is stored as s runs of n bytes: first byte 0 of
+// Byte shuffling (spec §10.6.3). A block of n items of s bytes each is stored as s runs of n bytes: first byte 0 of
 // every item, then byte 1 of every item, and so on. The bytes after the last complete item follow unchanged.
 
 namespace openxisf::detail {

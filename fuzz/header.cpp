@@ -4,14 +4,15 @@
 // Opens the input as a unit in memory, with small limits, leniently and strictly. Opening succeeds, or fails with an
 // error of untrusted input: invalid data, data that fail their checksum, an unsupported feature or a limit. Any other
 // exception escapes and fails the run. The two modes agree: the strict open fails with the code of the first error that
-// the lenient one recorded, and without such an error both find the same diagnostics and images. Every diagnostic is
-// valid UTF-8, whatever the input holds. The pixels of every image are then read in both storage models: each read
-// returns exactly the data size of its image, or fails with an error of untrusted input. What describes the images
-// keeps the promises of the API: thumbnails hold their pixel data, tables one value of the type of each field in each
-// row, colour filter arrays a pattern of their size, and display functions and working spaces values in their ranges.
-// A header-only open, once its ancillary data are loaded, holds what the lenient open holds. A signed unit returns its
-// signature and its root element as the input holds them, in valid UTF-8, and both modes return the same. Values
-// compare by their bits, since a NaN is not equal to itself.
+// the lenient one recorded, also when the cap on diagnostics, which inputs reach, folds that error into the last one,
+// and without such an error both find the same diagnostics and images. Every diagnostic is valid UTF-8, whatever the
+// input holds. The pixels of every image are then read in both storage models: each read returns exactly the data size
+// of its image, or fails with an error of untrusted input. What describes the images keeps the promises of the API:
+// thumbnails hold their pixel data, tables one value of the type of each field in each row, colour filter arrays a
+// pattern of their size, and display functions and working spaces values in their ranges. A header-only open, once its
+// ancillary data are loaded, holds what the lenient open holds. A signed unit returns its signature and its root
+// element as the input holds them, in valid UTF-8, and both modes return the same. Values compare by their bits, since
+// a NaN is not equal to itself.
 
 #include <openxisf/error.h>
 #include <openxisf/image.h>
@@ -66,7 +67,9 @@ outcome open(std::span<const std::byte> data, bool strict, bool header_only = fa
                                                     .max_xml_elements = 10'000,
                                                     .max_allocation = std::uint64_t{1} << 20,
                                                     .max_ancillary_data = std::uint64_t{1} << 20,
-                                                    .max_zstd_window = std::uint64_t{1} << 16}};
+                                                    .max_zstd_window = std::uint64_t{1} << 16,
+                                                    .max_diagnostics = 64,
+                                                    .max_model_objects = 256}};
     try {
         return {.unit = openxisf::reader(std::make_unique<openxisf::memory_source>(data), options)};
     } catch (const openxisf::invalid_data_error& failure) {

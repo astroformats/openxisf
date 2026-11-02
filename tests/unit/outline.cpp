@@ -3,6 +3,9 @@
 
 #include "model/outline.h"
 
+#include <openxisf/error.h>
+#include <openxisf/limits.h>
+
 #include "core/diagnostic_log.h"
 #include "support/diagnostics.h"
 #include "xml/xml_document.h"
@@ -33,11 +36,11 @@ struct outlined
     std::vector<openxisf::diagnostic> diagnostics{};
 };
 
-outlined outline_of(std::string_view root)
+outlined outline_of(std::string_view root, const openxisf::limits& limits = {})
 {
     outlined result{.document = openxisf::detail::parse_xml(root, 0, {})};
     openxisf::detail::diagnostic_log log(false);
-    result.outline = build_outline(result.document->document_element(), log);
+    result.outline = build_outline(result.document->document_element(), limits, log);
     result.diagnostics = log.release();
     return result;
 }
@@ -154,6 +157,27 @@ TEST(outline, a_reference_targets_the_element_it_names_before_or_after_it)
 
     EXPECT_EQ(elements[1].target, 2U);
     EXPECT_EQ(elements[3].target, 4U);
+}
+
+// The elements that become objects of the model count against limits::max_model_objects as they are walked: those of
+// images, thumbnails, properties, keywords, tables and their fields, and of what describes an image, but not Metadata,
+// Reference, Structure, Row, Cell or Data elements.
+TEST(outline, limits_the_objects_of_the_model)
+{
+    const std::string_view root =
+        R"(<xisf version="1.0"><Metadata><Property/><Reference ref="a"/></Metadata>)"
+        R"(<Image><Property uid="a"/><FITSKeyword/><ICCProfile><Data/></ICCProfile><RGBWorkingSpace/>)"
+        R"(<DisplayFunction/><ColorFilterArray/><Resolution/><Thumbnail/></Image>)"
+        R"(<Table><Structure><Field/></Structure><Row><Cell/><Cell/></Row><Row/></Table></xisf>)";
+    EXPECT_EQ(outline_of(root, {.max_model_objects = 12}).outline.elements.size(), 20U);
+    EXPECT_EQ(outline_of(root, {.max_model_objects = 0}).outline.elements.size(), 20U);
+    try {
+        (void)outline_of(root, {.max_model_objects = 11});
+        ADD_FAILURE() << "no exception";
+    } catch (const openxisf::limit_error& failure) {
+        EXPECT_EQ(failure.code(), openxisf::errc::too_many_model_objects);
+        EXPECT_EQ(failure.context().element, "/xisf/Table[1]/Structure[1]/Field[1]");
+    }
 }
 
 TEST(outline, names_the_kinds_of_elements)

@@ -78,7 +78,7 @@ template <std::unsigned_integral T> void store_big_endian(std::span<std::byte, s
 }
 
 /// Reverses the byte order of every item of item_size bytes, in place. Bytes after the last complete item are left
-/// unchanged, as byte shuffling does with them (spec §10.6.2).
+/// unchanged, as byte shuffling does with them (spec §10.6.3).
 void swap_byte_order(std::span<std::byte> data, std::size_t item_size) noexcept;
 
 } // namespace openxisf::detail

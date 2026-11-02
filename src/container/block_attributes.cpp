@@ -43,7 +43,7 @@ struct codec_entry
     bool shuffled = false;
 };
 
-// Spec §10.6.3 to §10.6.10.
+// Spec §10.6.4 to §10.6.11.
 constexpr std::array<codec_entry, 8> codec_names{{
     {.name = "zlib", .codec = compression_codec::zlib},
     {.name = "zlib+sh", .codec = compression_codec::zlib, .shuffled = true},
