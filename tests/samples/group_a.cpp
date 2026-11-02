@@ -190,6 +190,19 @@ TEST_P(samples_group_a, the_pixels_are_the_pattern_in_either_storage_model)
     EXPECT_EQ(count_differences(file, expected, pixel_storage::normal), 0);
 }
 
+// PixInsight stores a block of up to 3072 bytes, its default maximum inline block size, in the header, and a larger one
+// after it (sample_catalog.cpp), as the group asked: uncompressed and without a checksum.
+TEST_P(samples_group_a, the_image_is_embedded_up_to_3072_bytes_and_attached_beyond)
+{
+    const pattern_image& expected = image_of(GetParam());
+    const reader file(openxisf::test::sample_path(GetParam()), {.strict = true});
+    const std::uint64_t size = width * height * expected.channels * openxisf::sample_size(expected.format);
+    EXPECT_EQ(file.block(0), (openxisf::block_info{.location = size <= 3072 ? openxisf::block_location::embedded
+                                                                            : openxisf::block_location::attachment,
+                                                   .stored_size = size,
+                                                   .uncompressed_size = size}));
+}
+
 INSTANTIATE_TEST_SUITE_P(pixinsight, samples_group_a, testing::ValuesIn(openxisf::test::samples_of_group('A')),
                          [](const testing::TestParamInfo<sample>& parameter) {
                              return std::string(parameter.param.id);

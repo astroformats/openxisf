@@ -10,6 +10,8 @@
 #include <openxisf/error.h>
 #include <openxisf/reader.h>
 
+#include "core/data_encoding.h"
+#include "crypto/hash.h"
 #include "model/ancillary_budget.h"
 #include "model/unit.h"
 #include "support/bytes.h"
@@ -27,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -693,6 +696,104 @@ TEST(data_block, an_attached_block_larger_than_the_allocation_limit_is_not_read)
     std::vector<std::byte> destination(3);
     openxisf::detail::read_block_into(limited.source, block_at(limited, "/xisf/Image[1]"), limited.limits, destination);
     EXPECT_EQ(destination, abc());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Where the digest of an attached block is, which an editor rewrites in place
+
+// The SHA-1 digest of data, in lowercase hexadecimal digits.
+std::string sha1_hex(std::span<const std::byte> data)
+{
+    return openxisf::detail::encode_hex(openxisf::detail::compute_digest(openxisf::detail::hash_algorithm::sha1, data));
+}
+
+// Where text is in file, which holds it once.
+std::optional<std::uint64_t> place_of(std::span<const std::byte> file, std::string_view text)
+{
+    const std::string content = openxisf::test::text(file);
+    const std::size_t found = content.find(text);
+    EXPECT_EQ(content.find(text, found + 1), std::string::npos);
+    return found == std::string::npos ? std::optional<std::uint64_t>() : std::optional<std::uint64_t>(found);
+}
+
+TEST(data_block, the_digest_of_an_attached_block_is_located_in_the_source)
+{
+    // In any order of the attributes, with white space around the equals sign, in either quotes, with an alternate
+    // name, and in uppercase, which the reader accepts with a warning, after a byte order mark or not: the digits are
+    // where the file holds them.
+    const std::vector<std::byte> data = openxisf::test::pattern(10);
+    const std::string digest = sha1_hex(data);
+    std::string upper = digest;
+    std::ranges::transform(upper, upper.begin(),
+                           [](char c) { return c >= 'a' && c <= 'f' ? static_cast<char>(c - 32) : c; });
+    struct form
+    {
+        std::string attributes{};
+        std::string digits{};
+    };
+    for (const form& entry :
+         {form{.attributes = R"(checksum="sha1:)" + digest + R"(" location="attachment:{0}")", .digits = digest},
+          form{.attributes = R"(location="attachment:{0}" byteOrder="little" checksum="sha1:)" + digest + "\"",
+               .digits = digest},
+          form{.attributes = "location=\"attachment:{0}\"\n    checksum =\t'sha-1:" + digest + "'", .digits = digest},
+          form{.attributes = R"(location="attachment:{0}" checksum="SHA1:)" + upper + "\"", .digits = upper}}) {
+        for (const std::string_view mark : {"", "\xEF\xBB\xBF"}) {
+            const std::vector<std::byte> file =
+                file_with_attachments(std::string(mark) + header_xml(row_image(10, entry.attributes)), {data});
+            const unit opened = open_internal(file);
+            const block_descriptor& descriptor = descriptor_at(opened, "/xisf/Image[1]");
+            EXPECT_TRUE(descriptor.checksum.has_value()) << entry.attributes;
+            EXPECT_EQ(descriptor.digest_offset, place_of(file, entry.digits)) << entry.attributes << mark.size();
+        }
+    }
+}
+
+TEST(data_block, an_image_that_a_reference_lists_again_shares_the_located_digest_of_its_block)
+{
+    const std::vector<std::byte> data = openxisf::test::pattern(10);
+    const std::string digest = sha1_hex(data);
+    const std::vector<std::byte> file = file_with_attachments(
+        header_xml(row_image(10, R"(uid="first" location="attachment:{0}" checksum="sha1:)" + digest + "\"") +
+                   R"(<Reference ref="first"/>)"),
+        {data});
+    const unit opened = open_internal(file);
+    ASSERT_EQ(opened.images.blocks.size(), 2U);
+    EXPECT_EQ(opened.images.blocks[0], opened.images.blocks[1]);
+    EXPECT_EQ(descriptor_at(opened, "/xisf/Image[1]").digest_offset, place_of(file, digest));
+}
+
+TEST(data_block, a_digest_in_the_header_or_written_with_a_reference_is_not_located)
+{
+    const std::vector<std::byte> data = openxisf::test::pattern(10);
+    const std::string digest = sha1_hex(data);
+    // A character reference stands for the first digit: the checksum is that of the block, and its text is not.
+    constexpr std::string_view hex_digits = "0123456789abcdef";
+    const auto first = static_cast<unsigned char>(digest.front());
+    const std::string referenced =
+        std::string("&#x") + hex_digits[first >> 4U] + hex_digits[first & 0xFU] + ";" + digest.substr(1);
+    const unit with_reference = open_internal(file_with_attachments(
+        header_xml(row_image(10, R"(location="attachment:{0}" checksum="sha1:)" + referenced + "\"")), {data}));
+    const block_descriptor& descriptor = descriptor_at(with_reference, "/xisf/Image[1]");
+    EXPECT_TRUE(descriptor.checksum.has_value());
+    EXPECT_FALSE(descriptor.digest_offset.has_value());
+
+    // An attribute in another case is another attribute: the block has no checksum.
+    const unit other_case = open_internal(file_with_attachments(
+        header_xml(row_image(10, R"(location="attachment:{0}" Checksum="sha1:)" + digest + "\"")), {data}));
+    EXPECT_FALSE(descriptor_at(other_case, "/xisf/Image[1]").checksum.has_value());
+    EXPECT_FALSE(descriptor_at(other_case, "/xisf/Image[1]").digest_offset.has_value());
+
+    // An embedded or an inline block, which are in the header.
+    const std::string base64 = openxisf::detail::encode_base64(data);
+    const unit in_header =
+        open_body(row_image(10, R"(location="embedded")",
+                            R"(<Data encoding="base64" checksum="sha1:)" + digest + "\">" + base64 + "</Data>") +
+                  bytes_property(10, R"(location="inline:base64" checksum="sha1:)" + digest + "\"", base64));
+    EXPECT_TRUE(no_diagnostics(in_header.diagnostics));
+    for (const std::string_view path : {"/xisf/Image[1]", "/xisf/Property[1]"}) {
+        EXPECT_TRUE(descriptor_at(in_header, path).checksum.has_value()) << path;
+        EXPECT_FALSE(descriptor_at(in_header, path).digest_offset.has_value()) << path;
+    }
 }
 
 } // namespace

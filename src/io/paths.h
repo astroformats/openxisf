@@ -36,4 +36,12 @@ void check_path_argument(std::string_view path, std::string_view what);
 /// True when path is inside directory, both canonical paths of the system (native_file::find()).
 [[nodiscard]] bool is_inside(std::string_view path, std::string_view directory) noexcept;
 
+#if defined(_WIN32)
+/// True when path, absolute and normalized as Windows normalizes a path (GetFullPathNameW()), names a device: a path of
+/// the device namespace, \\.\ or \\?\, that does not go on with a file system, a drive and a separator (C:\), UNC\ or a
+/// volume (Volume{...}\). \\.\NUL, which a device name such as NUL becomes in any directory, \\.\COM1, \\.\pipe\name,
+/// \\.\C:, the volume itself, and \\?\GLOBALROOT\Device\Null are devices.
+[[nodiscard]] bool names_a_device(std::string_view path) noexcept;
+#endif
+
 } // namespace openxisf::detail

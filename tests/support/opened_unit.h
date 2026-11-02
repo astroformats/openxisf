@@ -14,8 +14,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -29,6 +31,26 @@ namespace openxisf::test {
 [[nodiscard]] inline detail::unit open_internal(std::vector<std::byte> unit, read_options options = {})
 {
     return {std::make_unique<memory_source>(std::move(unit)), std::move(options)};
+}
+
+/// A source of the bytes of a unit that copies them at each read, as a file source does, and gives none in memory
+/// (input_source::bytes()), so that the library reads it as it reads a file. Any number of threads can read it at once.
+[[nodiscard]] inline std::unique_ptr<input_source> file_like_source(std::vector<std::byte> unit)
+{
+    auto held = std::make_shared<const std::vector<std::byte>>(std::move(unit));
+    const std::uint64_t size = held->size();
+    return std::make_unique<callback_source>(
+        size,
+        [held = std::move(held)](std::uint64_t offset, std::span<std::byte> destination) {
+            std::ranges::copy(std::span(*held).subspan(offset, destination.size()), destination.begin());
+        },
+        callback_source_options{.concurrent_reads = true});
+}
+
+/// Opens the unit through file_like_source().
+[[nodiscard]] inline detail::unit open_file_like(std::vector<std::byte> unit, read_options options = {})
+{
+    return {file_like_source(std::move(unit)), std::move(options)};
 }
 
 /// The block of the element at path. Fails the test when there is none.

@@ -5,7 +5,8 @@
 # find_package (the default), the installed pkg-config file, or the sources of OPENXISF_SOURCE_DIR through FetchContent,
 # as a project that is not the top level. The test suite of the main project builds it against a staged install (see
 # tests/CMakeLists.txt), and CI builds it against the vcpkg port, through pkg-config and from the sources. Given
-# OPENXISF_PACKAGE_VERSION, the version of the package, it also checks the versions that the package accepts.
+# OPENXISF_PACKAGE_VERSION, the version of the package, it also checks the versions that the package accepts, and the
+# name of a Windows DLL.
 
 cmake_minimum_required(VERSION 3.25)
 
@@ -34,6 +35,19 @@ if(OPENXISF_CONSUMED_AS STREQUAL "package" AND OPENXISF_PACKAGE_VERSION)
         endif()
     endforeach()
     find_package(openxisf ${major_minor} CONFIG REQUIRED)
+    # The DLL of a Windows shared library is named after its minor version, as the soname is elsewhere, and the
+    # consumer loads it by that name.
+    get_target_property(type openxisf::openxisf TYPE)
+    if(WIN32 AND type STREQUAL "SHARED_LIBRARY")
+        get_target_property(configurations openxisf::openxisf IMPORTED_CONFIGURATIONS)
+        foreach(configuration ${configurations})
+            get_target_property(location openxisf::openxisf IMPORTED_LOCATION_${configuration})
+            get_filename_component(name "${location}" NAME)
+            if(NOT name MATCHES "^(lib)?openxisf-${major}\\.${minor}d?\\.dll$")
+                message(FATAL_ERROR "The DLL of openxisf ${version} is ${name}")
+            endif()
+        endforeach()
+    endif()
     target_link_libraries(consumer PRIVATE openxisf::openxisf)
 elseif(OPENXISF_CONSUMED_AS STREQUAL "package")
     find_package(openxisf CONFIG REQUIRED)

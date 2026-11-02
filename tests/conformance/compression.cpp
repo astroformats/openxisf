@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Ezequiel Ruiz
 
 // Spec §10.6: compressed data blocks in units, in every location, with subblocks, and verified before they are
-// decompressed (spec §10.6.1). The codecs themselves are tested in unit/codecs.cpp and unit/compressed_block.cpp.
+// decompressed (spec §10.6.2). The codecs themselves are tested in unit/codecs.cpp and unit/compressed_block.cpp.
 
 #include <openxisf/error.h>
 #include <openxisf/reader.h>
 
+#include "codec/codecs.h"
 #include "codec/compressed_block.h"
 #include "core/data_encoding.h"
 #include "crypto/hash.h"
@@ -19,8 +20,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -87,7 +90,7 @@ std::vector<std::byte> pixels()
 constexpr std::string_view row_image = R"(<Image geometry="600:1:1" sampleFormat="UInt16" colorSpace="Gray" )";
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The examples of spec §10.6.3
+// The examples of spec §10.6.4
 
 TEST(conformance_compression, the_embedded_zlib_image_of_the_specification_decodes)
 {
@@ -182,7 +185,55 @@ TEST(conformance_compression, the_subblocks_of_a_block_decode_one_after_the_othe
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Corrupt data (spec §10.6.1)
+// Uncompressed subblocks (spec §10.6.1, Revision 2): the stored ones are tested with the encoder in
+// unit/compressed_block and conformance/baseline_decoder; here, what a decoder owes the units of encoders of earlier
+// revisions.
+
+TEST(conformance_compression, a_subblock_longer_than_its_data_is_decompressed)
+{
+    // An encoder of an earlier revision could compress a subblock that got longer, which is decompressed all the
+    // same; equal sizes alone mean data stored as they are. The first 400 bytes are noise, which Zstandard makes
+    // longer; the rest compress.
+    std::vector<std::byte> data = pixels();
+    std::uint32_t state = 5;
+    for (std::size_t i = 0; i < 400; ++i) {
+        state = (state * 1'664'525U) + 1'013'904'223U;
+        data[i] = static_cast<std::byte>(state >> 24U);
+    }
+    std::vector<std::byte> longer;
+    openxisf::detail::zstd_compress(std::span(data).first(400), 1, longer);
+    ASSERT_GT(longer.size(), 400U);
+    std::vector<std::byte> shorter;
+    openxisf::detail::zstd_compress(std::span(data).subspan(400), 1, shorter);
+    ASSERT_LT(shorter.size(), 800U);
+    std::vector<std::byte> stored(longer.size() + shorter.size());
+    std::ranges::copy(shorter, std::ranges::copy(longer, stored.begin()).out);
+    const unit opened = open_internal(
+        file_with_attachments(
+            header_xml(std::string(row_image) + R"(location="attachment:{0}" compression="zstd:1200" subblocks=")" +
+                       std::to_string(longer.size()) + ",400:" + std::to_string(shorter.size()) + ",800\"/>"),
+            {stored}),
+        {.strict = true});
+    EXPECT_TRUE(no_diagnostics(opened.diagnostics));
+    EXPECT_EQ(block_data(opened, "/xisf/Image[1]"), data);
+}
+
+TEST(conformance_compression, a_block_that_does_not_decode_to_its_size_is_invalid)
+{
+    // Each compressed subblock decompresses to exactly its uncompressed size, or the block is invalid: the stream
+    // decodes to 1200 bytes, and the block declares the 1199 that its image needs.
+    const compressed_block block = compress_block(pixels(), {.codec = compression_codec::zlib});
+    const unit opened = open_internal(file_with_attachments(
+        header_xml(
+            R"(<Image geometry="1199:1:1" sampleFormat="UInt8" location="attachment:{0}" compression="zlib:1199"/>)"),
+        {block.data}));
+    EXPECT_TRUE(no_diagnostics(opened.diagnostics));
+    EXPECT_TRUE(throws<openxisf::integrity_error>(errc::corrupt_compressed_data,
+                                                  [&opened] { (void)block_data(opened, "/xisf/Image[1]"); }));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Corrupt data (spec §10.6.2)
 
 // Compressed data with a changed byte, which the codec rejects.
 std::vector<std::byte> corrupt_block()
@@ -247,6 +298,28 @@ TEST(conformance_compression, a_block_that_decompresses_beyond_the_allocation_li
         EXPECT_EQ(failure.context().element, "/xisf/Image[1]");
     }
     EXPECT_EQ(block_data(open_internal(file, {.limits = {.max_allocation = 1200}}), "/xisf/Image[1]"), pixels());
+}
+
+TEST(conformance_compression, a_zstd_block_beyond_the_limit_of_its_expansion_is_unavailable)
+{
+    // The 1200 bytes of the pixels compress to fewer than 600, so a limit of 2 bytes for each stored byte refuses them,
+    // and the default of the format, 32768, does not.
+    const compressed_block block = compress_block(pixels(), {.codec = compression_codec::zstd});
+    ASSERT_LT(block.data.size(), 600U);
+    const std::vector<std::byte> file = file_with_attachments(
+        header_xml(std::string(row_image) + R"(location="attachment:{0}" compression="zstd:1200"/>)"), {block.data});
+
+    const unit limited = open_internal(file, {.limits = {.max_zstd_expansion = 2}});
+    ASSERT_TRUE(
+        single_diagnostic(limited.diagnostics, severity::error, errc::zstd_expansion_too_large, "/xisf/Image[1]"));
+    EXPECT_EQ(limited.diagnostics.front().context.attribute, "compression");
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::zstd_expansion_too_large,
+                                              [&limited] { (void)block_data(limited, "/xisf/Image[1]"); }));
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::zstd_expansion_too_large, [&file] {
+        (void)open_internal(file, {.strict = true, .limits = {.max_zstd_expansion = 2}});
+    }));
+    EXPECT_EQ(block_data(open_internal(file), "/xisf/Image[1]"), pixels());
+    EXPECT_EQ(block_data(open_internal(file, {.limits = {.max_zstd_expansion = 0}}), "/xisf/Image[1]"), pixels());
 }
 
 TEST(conformance_compression, a_block_too_large_for_its_decoder_without_subblocks_is_unavailable)

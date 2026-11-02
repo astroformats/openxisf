@@ -54,5 +54,15 @@ add_test(NAME example.read_info.long_string
         -P "${CMAKE_CURRENT_SOURCE_DIR}/expect_output.cmake")
 set_tests_properties(example.read_info.long_string PROPERTIES LABELS example)
 openxisf_add_sample(read_pixels "${sample_data}/a4-rgb-f32.xisf")
+# The region read into a tile, which the test finds in the output, besides the exit code.
+add_test(NAME example.read_pixels.region
+    COMMAND "${CMAKE_COMMAND}" "-DPROGRAM=$<TARGET_FILE:read_pixels>" "-DARGUMENT=${sample_data}/a4-rgb-f32.xisf"
+        "-DEXPECTED=read a region of [0-9]+ x [0-9]+ pixels of channel 0 into a tile.*the region matches the whole image"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/expect_output.cmake")
+set_tests_properties(example.read_pixels.region PROPERTIES LABELS example)
 openxisf_add_sample(stream_io "${sample_data}/a6-rgba-u16.xisf")
+# Writes its frames into the directory of its build, and stacks them from threads of its own.
+find_package(Threads REQUIRED)
+openxisf_add_sample(stack_regions "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(stack_regions PRIVATE Threads::Threads)
 openxisf_add_sample(write_image "${CMAKE_CURRENT_BINARY_DIR}/write_image.xisf")

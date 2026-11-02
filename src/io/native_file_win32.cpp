@@ -5,6 +5,7 @@
 
 #include "core/utf16.h"
 #include "io/native_file.h"
+#include "io/paths.h"
 
 #include <windows.h>
 
@@ -115,16 +116,37 @@ bool is_directory(const std::wstring& path) noexcept
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-// True when GetFullPathNameW() made path, which did not name the device namespace, a path of it: a device name such as
-// NUL in any directory, and before Windows 11 also CON, COM1 or LPT1, with or without an extension, becomes \\.\NUL.
-// Such a path is refused before it is opened, since opening a device can act on it, as opening a serial port resets
-// some controllers.
-bool made_a_device(const std::string& path, const std::wstring& wide) noexcept
+// True when wide, a path that system_path() made, names a device (names_a_device()): a path of the device namespace
+// that the application gave, such as \\.\COM1 or \\.\pipe\name, or that GetFullPathNameW() made of a device name, such
+// as NUL in any directory, and before Windows 11 also CON, COM1 or LPT1, with or without an extension, which becomes
+// \\.\NUL. Such a path is refused by its text, before anything opens it or asks for its attributes, since opening a
+// device can act on it, as opening a serial port resets some controllers, and asking for the attributes of a named pipe
+// opens it.
+bool is_device(const std::wstring& wide)
 {
-    const auto separator = [](char c) { return c == '\\' || c == '/'; };
-    const bool given =
-        path.size() >= 4 && separator(path[0]) && separator(path[1]) && path[2] == '.' && separator(path[3]);
-    return !given && wide.starts_with(LR"(\\.\)");
+    try {
+        return names_a_device(utf16_to_utf8(std::u16string(wide.begin(), wide.end())));
+    } catch (const invalid_data_error&) {
+        // No valid UTF-8 path becomes it.
+        return true;
+    }
+}
+
+// True when the reparse point at path is a symbolic link or a junction, which a rename replaces itself. A reparse point
+// of another kind, such as the placeholder of a cloud file system, is what its attributes say. False when its kind
+// cannot be read.
+bool is_link(const std::wstring& path) noexcept
+{
+    HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    FILE_ATTRIBUTE_TAG_INFO information{};
+    const BOOL read = GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &information, sizeof(information));
+    (void)CloseHandle(handle);
+    return read != FALSE &&
+           (information.ReparseTag == IO_REPARSE_TAG_SYMLINK || information.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT);
 }
 
 // Renames an open file over target with POSIX semantics, which replace a target that other programs have open, as a
@@ -175,19 +197,17 @@ void check_replaceable(const std::string& path)
     if (wide.empty()) {
         return;
     }
-    // GetFullPathNameW() makes a device name such as NUL, COM1 or CON, in any directory, a device of the device
-    // namespace: \\.\NUL, with no separator after the prefix.
-    if (wide.starts_with(LR"(\\.\)") && wide.find(L'\\', 4) == std::wstring::npos) {
+    if (is_device(wide)) {
         fail_not_regular(path);
     }
     // The attributes of a symbolic link or a junction are its own, with FILE_ATTRIBUTE_REPARSE_POINT: a directory that
-    // is one is a link, which a rename replaces.
+    // is one is a link, which a rename replaces, and a directory that is a reparse point of another kind a directory.
     const DWORD attributes = GetFileAttributesW(wide.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return;
     }
-    const bool directory =
-        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    const bool directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+                           ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 || !is_link(wide));
     if (directory || (attributes & FILE_ATTRIBUTE_DEVICE) != 0) {
         fail_not_regular(path);
     }
@@ -197,21 +217,34 @@ bool is_directory(const std::string& path)
 {
     // A junction, or a symbolic link to a directory, has FILE_ATTRIBUTE_DIRECTORY itself.
     const std::wstring wide = system_path(path);
-    return !wide.empty() && is_directory(wide);
+    return !wide.empty() && !is_device(wide) && is_directory(wide);
 }
 
 native_file native_file::open_for_reading(const std::string& path)
 {
+    return open_existing(path, false);
+}
+
+native_file native_file::open_for_update(const std::string& path)
+{
+    return open_existing(path, true);
+}
+
+native_file native_file::open_existing(const std::string& path, bool writable)
+{
+    const std::string what = writable ? "cannot open " + path + " for reading and writing" : "cannot open " + path;
     const std::wstring wide = system_path(path);
     if (wide.empty()) {
-        fail(errc::open_failed, "cannot open " + path, last_error());
+        fail(errc::open_failed, what, last_error());
     }
-    if (made_a_device(path, wide)) {
+    if (is_device(wide)) {
         fail_not_regular(path);
     }
-    // Other programs may go on using the file, as they could on POSIX systems.
-    HANDLE handle = CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Other programs may go on using the file, as they could on POSIX systems. A file with the read-only attribute
+    // refuses write access (ERROR_ACCESS_DENIED).
+    const DWORD access = writable ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ;
+    HANDLE handle = CreateFileW(wide.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         const std::error_code error = last_error();
         // Opening a directory needs FILE_FLAG_BACKUP_SEMANTICS. Without it, the failure is a denied access, but for the
@@ -219,7 +252,7 @@ native_file native_file::open_for_reading(const std::string& path)
         if (is_directory(wide)) {
             fail_not_regular(path);
         }
-        fail(errc::open_failed, "cannot open " + path, error);
+        fail(errc::open_failed, what, error);
     }
     native_file file(handle, path);
     // A device such as NUL or a named pipe is not a disk file.
@@ -259,7 +292,7 @@ native_file native_file::find(const std::string& path)
     if (wide.empty()) {
         fail(errc::open_failed, "cannot find " + path, last_error());
     }
-    if (made_a_device(path, wide)) {
+    if (is_device(wide)) {
         fail_not_regular(path);
     }
     // A handle without access to the content only names the file; backup semantics let it name a directory too.
@@ -297,7 +330,7 @@ native_file native_file::find(const std::string& path)
     fail(errc::open_failed, "cannot resolve " + path, last_error());
 }
 
-native_file native_file::reopen_for_reading() const
+native_file native_file::reopen_for_reading(const std::string& /*directory*/) const
 {
     // The file of the handle, not the file that its path names: Windows trims the dots and spaces that end each step
     // of a path that it normalizes, so the canonical path of a directory named "sub." would open "sub" instead.

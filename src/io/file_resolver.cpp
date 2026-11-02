@@ -55,22 +55,24 @@ private:
     std::uint64_t size_;
 };
 
-// A . or .. step of a relative path follows a directory, as POSIX resolves a path (spec §10.3), so that a path whose
-// last step is one names a directory. Windows drops these steps from the text of a path before it looks at the file
-// system, and the realpath() of macOS skips a . step after a file: data.xisb/. and sub/more.dat/../more.dat would open
-// a file there, which Linux refuses.
-void check_dot_steps(const std::string& directory, const std::string& relative)
+// A . or .. step of a path in UNIX syntax follows a directory, as POSIX resolves a path (spec §10.3), so that a path
+// whose last step is one names a directory. Windows drops these steps from the text of a path before it looks at the
+// file system, and the realpath() of macOS skips a . step after a file: data.xisb/. and sub/more.dat/../more.dat would
+// open a file there, which Linux refuses. The steps from first on are checked, after the directory that comes before
+// the first step of a relative path or the root of an absolute one; system_path_of gives the path of the system for
+// the text before a step.
+template <typename SystemPath>
+void check_dot_steps(const std::string& path, std::size_t first, const SystemPath& system_path_of)
 {
-    std::size_t start = 0;
-    while (start <= relative.size()) {
-        const std::size_t end = std::min(relative.find('/', start), relative.size());
-        const std::string_view step = std::string_view(relative).substr(start, end - start);
-        // The directory of the header file comes before the first step.
-        if ((step == "." || step == "..") && start > 0) {
-            const std::string before = relative.substr(0, start - 1);
-            if (!detail::is_directory(detail::relative_system_path(directory, before))) {
+    std::size_t start = first;
+    while (start <= path.size()) {
+        const std::size_t end = std::min(path.find('/', start), path.size());
+        const std::string_view step = std::string_view(path).substr(start, end - start);
+        if ((step == "." || step == "..") && start > first) {
+            const std::string before = path.substr(0, start - 1);
+            if (!detail::is_directory(system_path_of(before))) {
                 throw io_error(errc::open_failed,
-                               "the path " + detail::quote(relative) + " has a " + std::string(step) + " step after " +
+                               "the path " + detail::quote(path) + " has a " + std::string(step) + " step after " +
                                    detail::quote(before) + ", which is not a directory",
                                std::make_error_code(std::errc::not_a_directory));
             }
@@ -79,12 +81,23 @@ void check_dot_steps(const std::string& directory, const std::string& relative)
     }
 }
 
+// An absolute path names any file, which the application allowed: it is opened as file_source opens a path, with the
+// . and .. steps of a relative one.
+std::unique_ptr<input_source> open_absolute(const std::string& absolute)
+{
+    const std::string path = detail::absolute_system_path(absolute);
+    check_dot_steps(absolute, 1, [](const std::string& before) { return detail::absolute_system_path(before); });
+    return std::make_unique<file_source>(path);
+}
+
 // A relative path leads to a file inside the directory once both are canonical, so that neither .. nor a symbolic
 // link takes it out (spec §10.3 lets a path hold both).
 std::unique_ptr<input_source> open_inside(const std::string& directory, const std::string& relative)
 {
     const std::string path = detail::relative_system_path(directory, relative);
-    check_dot_steps(directory, relative);
+    check_dot_steps(relative, 0, [&directory](const std::string& before) {
+        return detail::relative_system_path(directory, before);
+    });
     const std::string base = detail::native_file::find(directory).name();
     const detail::native_file found = detail::native_file::find(path);
     if (!detail::is_inside(found.name(), base)) {
@@ -93,8 +106,8 @@ std::unique_ptr<input_source> open_inside(const std::string& directory, const st
                                                                 ", outside the directory of the header file, " + base);
     }
     // The file whose path was checked, named by that path, which on Windows starts with \\?\. Windows reads it through
-    // the handle that found it; other systems open that path again.
-    return std::make_unique<confined_file>(found.reopen_for_reading());
+    // the handle that found it; other systems open it from the directory step by step, without following a link.
+    return std::make_unique<confined_file>(found.reopen_for_reading(base));
 }
 
 } // namespace
@@ -117,7 +130,7 @@ external_resolver file_resolver(std::string_view header_directory, file_resolver
                                                                         " is not opened, since absolute paths are not "
                                                                         "allowed");
             }
-            return std::make_unique<file_source>(detail::absolute_system_path(reference.location));
+            return open_absolute(reference.location);
         case location_form::relative_path:
             break;
         }

@@ -11,7 +11,7 @@
 #include <span>
 #include <vector>
 
-// The adapters of the compression libraries (spec §10.6.3 to §10.6.10), one subblock at a time. A decoder fills its
+// The adapters of the compression libraries (spec §10.6.4 to §10.6.11), one subblock at a time. A decoder fills its
 // output exactly and consumes all of its input, or throws integrity_error with errc::corrupt_compressed_data; it never
 // returns part of a subblock. An encoder appends to its output. Out of memory is std::bad_alloc; a library that fails
 // for any other reason than the data, such as a version mismatch, throws unsupported_error with errc::codec_failure.

@@ -378,4 +378,29 @@ TEST(xml_document, finds_the_end_of_a_tag)
     EXPECT_FALSE(tag_end("<a", 0).has_value());
 }
 
+TEST(xml_document, finds_where_the_value_of_an_attribute_is_written)
+{
+    // The value as written, between its quotes, in either kind of quotes, with white space around the equals sign, and
+    // after values that hold '>' or the other quote.
+    const auto value_of = [](std::string_view text, std::size_t start, std::string_view name) -> std::string_view {
+        const std::optional<openxisf::detail::text_span> found = openxisf::detail::attribute_text(text, start, name);
+        if (!found) {
+            return "(none)";
+        }
+        return text.substr(found->offset, found->length);
+    };
+    EXPECT_EQ(value_of(R"(<a b="1" c='2'/>)", 0, "b"), "1");
+    EXPECT_EQ(value_of(R"(<a b="1" c='2'/>)", 0, "c"), "2");
+    EXPECT_EQ(value_of(R"(x<a b='>"' c = "&#x33;">y)", 1, "c"), "&#x33;");
+    EXPECT_EQ(value_of("<a\n\tb\r\n=\n'' >", 0, "b"), "");
+    EXPECT_EQ(value_of(R"(<p:a p:b="1" b="2">)", 0, "b"), "2");
+    EXPECT_EQ(value_of(R"(<p:a p:b="1" b="2">)", 0, "p:b"), "1");
+    // Names are compared as written.
+    EXPECT_EQ(value_of(R"(<a B="1">)", 0, "b"), "(none)");
+    EXPECT_EQ(value_of(R"(<a b="1"><c d="2"/></a>)", 0, "d"), "(none)");
+    EXPECT_EQ(value_of(R"(<a b="1)", 0, "b"), "(none)");
+    EXPECT_EQ(value_of(R"(<a b)", 0, "b"), "(none)");
+    EXPECT_EQ(value_of(R"(<a b=1>)", 0, "b"), "(none)");
+}
+
 } // namespace

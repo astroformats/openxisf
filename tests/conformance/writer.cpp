@@ -6,7 +6,7 @@
 // forms (§8.3) and format specifiers (§8.4.3), tables (§8.4.4.7), and images of several dimensions, sample formats,
 // colour spaces, storage models and ranges (§8.5.1 to §8.5.5, §11.5.1) with every ancillary element (§11.6 to
 // §11.12). The files have little-endian structural integers (§8.2) and the layout of §9.1 and §9.2, with attached
-// and inline blocks (§10.1), checksums (§10.5), and each codec (§10.6.3 to §10.6.10), with byte shuffling (§10.6.2)
+// and inline blocks (§10.1), checksums (§10.5), and each codec (§10.6.4 to §10.6.11), with byte shuffling (§10.6.3)
 // and subblocks. The properties of an astrometric solution are kept as they are (§11.5.3.7). The round trips cover
 // distributed units too; what is particular to them is in conformance/distributed.cpp.
 
@@ -578,7 +578,7 @@ TEST_P(conformance_writer_round_trip, reads_back_as_its_model)
     // Every block has the checksum asked for, and the blocks that compress are compressed; the noise is not.
     const std::unique_ptr<pugi::xml_document>& header = written_unit.header;
     for (const pugi::xml_node& element : block_elements(*header)) {
-        // PixInsight reads a subblock that is not smaller than its data as data stored as they are.
+        // Spec §10.6.1: a compressed subblock is shorter than its data; one that is not is stored as it is.
         if (const std::string_view subblocks = element.attribute("subblocks").value(); !subblocks.empty()) {
             for (const openxisf::detail::subblock& part : openxisf::detail::parse_subblocks(subblocks)) {
                 EXPECT_LE(part.compressed_size, part.uncompressed_size) << element.path();
@@ -684,7 +684,7 @@ TEST(conformance_writer, writes_a_unit_byte_for_byte)
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!--\n"
         "Extensible Image Serialization Format - XISF version 1.0\n"
-        "Created with OpenXISF " OPENXISF_VERSION_STRING " - https://github.com/openxisf/openxisf\n"
+        "Created with OpenXISF " OPENXISF_VERSION_STRING " - https://github.com/astroformats/openxisf\n"
         "-->\n"
         "<xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\" "
         "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
@@ -1073,6 +1073,44 @@ TEST(conformance_writer, subblocks_divide_a_block_into_pieces_of_at_most_their_s
     }
 }
 
+TEST(conformance_writer, a_block_above_4_mib_is_divided_into_subblocks_of_4_mib_by_default)
+{
+    // The default subblock size is 4 MiB, which PixInsight writes since 1.9.6: a compressed block above it is divided
+    // into subblocks of 4 MiB, which decoders decompress in parallel and a region read decodes in part, and one
+    // within it is a single subblock. With 0 the block is a single subblock whatever its size.
+    constexpr std::uint64_t mib = std::uint64_t{1} << 20;
+    EXPECT_EQ(write_options{}.subblock_size, 4 * mib);
+    // 2048 x 1025 UInt16 samples, 4 MiB and 4096 bytes, as the image of PixInsight's sample E1.
+    image_info large = simple_image(openxisf::sample_format::uint16, {2048, 1025}, 1);
+    large.id = "large";
+    const std::vector<std::byte> pixels = openxisf::test::pattern(large.data_size());
+    for (const bool whole : {false, true}) {
+        write_options options = basic_options();
+        options.codec = openxisf::codec::zstd;
+        if (whole) {
+            options.subblock_size = 0;
+        }
+        openxisf::writer output(options);
+        (void)output.add_image(large, pixels);
+        const std::vector<std::byte> file = written(output);
+        const auto header = parsed_header(file);
+        const std::string_view subblocks = image_element(*header, "large").attribute("subblocks").value();
+        if (whole) {
+            EXPECT_TRUE(subblocks.empty()) << subblocks;
+        } else {
+            ASSERT_FALSE(subblocks.empty());
+            const std::vector<openxisf::detail::subblock> parts = openxisf::detail::parse_subblocks(subblocks);
+            ASSERT_EQ(parts.size(), 2U);
+            EXPECT_EQ(parts[0].uncompressed_size, 4 * mib);
+            EXPECT_EQ(parts[1].uncompressed_size, 4096U);
+        }
+        const openxisf::reader unit = open_strictly(file);
+        EXPECT_EQ(unit.block(0).subblock_size, whole ? large.data_size() : 4 * mib);
+        EXPECT_EQ(unit.block(0).subblock_count, whole ? 1U : 2U);
+        EXPECT_EQ(unit.read_pixels(0), pixels);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Checksums
 
@@ -1101,7 +1139,7 @@ TEST(conformance_writer, every_checksum_algorithm_is_written_over_the_stored_byt
         EXPECT_EQ(unit.metadata().at("XISF:ChecksumAlgorithms").value, property_value(entry.name));
         EXPECT_EQ(unit.read_pixels(0), rich_model().pixels[0]);
 
-        // The digest of the compressed bytes (spec §10.6.1), computed here independently of the reader.
+        // The digest of the compressed bytes (spec §10.6.2), computed here independently of the reader.
         const auto header = parsed_header(file);
         const pugi::xml_node rich = image_element(*header, "rich");
         ASSERT_FALSE(rich.attribute("compression").empty());
@@ -1281,7 +1319,13 @@ TEST(conformance_writer, images_need_pixel_data_of_their_size_and_type)
     EXPECT_TRUE(output.images().empty());
     EXPECT_EQ(output.add_image(image, std::span<const std::uint16_t>(samples)), 0U);
     EXPECT_EQ(output.add_image(image, std::as_bytes(std::span(samples))), 1U);
-    ASSERT_EQ(output.images().size(), 2U);
+    // Samples that are not const, with the same checks.
+    std::vector<std::uint16_t> writable(6);
+    std::vector<std::uint8_t> writable_bytes(12);
+    EXPECT_TRUE(openxisf::test::throws<openxisf::usage_error>(
+        errc::invalid_argument, [&] { (void)output.add_image(image, std::span(writable_bytes)); }));
+    EXPECT_EQ(output.add_image(image, std::span(writable)), 2U);
+    ASSERT_EQ(output.images().size(), 3U);
     EXPECT_EQ(output.images()[1], image);
 }
 
@@ -1331,30 +1375,44 @@ TEST(conformance_writer, the_codec_and_the_checksum_algorithm_are_among_their_en
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Saving to a file (spec §9.6)
+// Saving to a file
 
-TEST(conformance_writer, a_file_name_ends_with_xisf)
+TEST(conformance_writer, a_monolithic_file_takes_the_name_that_it_is_given)
 {
+    // Spec §9.6 gives a monolithic file the .xisf suffix, on which nothing in the unit depends: the application names
+    // the file, as a durable save names a temporary file that it renames into place, and the reader recognizes a unit
+    // by its content.
     const openxisf::test::temp_directory directory;
     const unit_model model = rich_model();
     const openxisf::writer output = model.writer(basic_options());
-    for (const std::string_view name :
-         {"unit.fits", "unit", "unit.xisf.tmp", "unit.xish", ".xis", "unitxisf", "unit.yisf"}) {
-        EXPECT_TRUE(openxisf::test::throws<openxisf::usage_error>(errc::invalid_argument, [&] {
-            output.save(directory.file(name));
-        })) << name;
-    }
-    EXPECT_EQ(directory.entries(), 0U);
-    for (const std::string_view name : {"unit.xisf", "Unit.XISF",
-                                        "N\xC3\xA9"
-                                        "bula.Xisf",
-                                        ".xisf"}) {
+    const auto save_and_read = [&](std::string_view name) {
         output.save(directory.file(name));
         openxisf::test::record_unit(
             openxisf::test::bytes(openxisf::test::read_file(openxisf::test::path_of(directory.file(name)))));
         const openxisf::reader unit(directory.file(name));
         EXPECT_EQ(unit.image(0), model.images[0]) << name;
+    };
+    for (const std::string_view name :
+         {"unit.fits", "unit", "unit.xisf.tmp", "unit.xish", ".xis", "unitxisf", "unit.yisf"}) {
+        save_and_read(name);
     }
+    for (const std::string_view name : {"unit.xisf", "Unit.XISF",
+                                        "N\xC3\xA9"
+                                        "bula.Xisf",
+                                        ".xisf"}) {
+        save_and_read(name);
+    }
+}
+
+TEST(conformance_writer, a_path_that_names_no_file_is_refused_before_the_unit_is_checked)
+{
+    // A creator application without a version fails the checks of the unit (spec §11.4.1), which come after those of
+    // the path, so that nothing is written either way.
+    const openxisf::writer invalid({.creator_application = "no version"});
+    EXPECT_TRUE(
+        openxisf::test::throws<openxisf::usage_error>(errc::invalid_argument, [&invalid] { invalid.save(""); }));
+    EXPECT_TRUE(
+        openxisf::test::throws<openxisf::usage_error>(errc::invalid_utf8, [&invalid] { invalid.save("a\xC3.xisf"); }));
 }
 
 TEST(conformance_writer, a_file_is_replaced_only_by_a_complete_unit)
@@ -1545,6 +1603,160 @@ TEST(conformance_writer, the_properties_of_an_astrometric_solution_are_kept_as_t
     (void)refused.add_image(image, std::span<const std::uint16_t>(samples));
     EXPECT_TRUE(openxisf::test::throws<openxisf::validation_error>(errc::reserved_property_type,
                                                                    [&] { (void)written(refused); }));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Reserved images: zeros, without pixel data in memory, which an editor fills in place
+
+// A writer of a gray image of one row of data, then a reserved planar RGB image of 5 x 3 pixels, then a reserved gray
+// one of 2 x 2, with the given options. The images have ids, which name their elements.
+openxisf::writer reserving_writer(const write_options& options, const std::vector<std::uint16_t>& data)
+{
+    openxisf::writer output(options);
+    image_info first = simple_image(openxisf::sample_format::uint16, {data.size(), 1}, 1);
+    first.id = "data";
+    image_info reserved = simple_image(openxisf::sample_format::uint16, {5, 3}, 3, openxisf::color_space::rgb);
+    reserved.id = "reserved";
+    image_info small = simple_image(openxisf::sample_format::uint8, {2, 2}, 1);
+    small.id = "small";
+    EXPECT_EQ(output.add_image(first, std::span(data)), 0U);
+    EXPECT_EQ(output.add_reserved_image(reserved), 1U);
+    EXPECT_EQ(output.add_reserved_image(small), 2U);
+    return output;
+}
+
+// Checks that the unit in file holds the images of reserving_writer() with zeros in the reserved ones, read strictly,
+// and that their elements are written with the given checksum algorithm and without compression.
+void expect_reserved_images(const openxisf::reader& unit, const pugi::xml_document& header,
+                            const std::vector<std::uint16_t>& data, std::string_view algorithm)
+{
+    ASSERT_EQ(unit.images().size(), 3U);
+    EXPECT_EQ(unit.image(1).geometry, (openxisf::geometry{.dimensions = {5, 3}, .channels = 3}));
+    EXPECT_EQ(unit.read_pixels<std::uint16_t>(0), data);
+    EXPECT_EQ(unit.read_pixels(1), std::vector<std::byte>(90));
+    EXPECT_EQ(unit.read_pixels(2), std::vector<std::byte>(4));
+    for (const auto& [id, size] : {std::pair<std::string_view, std::size_t>{"reserved", 90}, {"small", 4}}) {
+        const pugi::xml_node element = image_element(header, id);
+        EXPECT_TRUE(element.attribute("compression").empty()) << id;
+        if (algorithm.empty()) {
+            EXPECT_TRUE(element.attribute("checksum").empty()) << id;
+        } else {
+            const std::vector<std::byte> zeros(size);
+            EXPECT_EQ(std::string(element.attribute("checksum").value()),
+                      std::string(algorithm) + ":" +
+                          openxisf::detail::encode_hex(
+                              openxisf::detail::compute_digest(openxisf::detail::hash_algorithm::sha256, zeros)))
+                << id;
+        }
+    }
+}
+
+TEST(conformance_writer, a_reserved_image_is_written_as_zeros_without_compression_or_checksum)
+{
+    const std::vector<std::uint16_t> data{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    for (const sink_kind sink : {sink_kind::rewritable, sink_kind::append_only}) {
+        const openxisf::writer output = reserving_writer(basic_options(), data);
+        EXPECT_EQ(output.images().size(), 3U);
+        const std::vector<std::byte> file = written(output, sink);
+        expect_reserved_images(open_strictly(file), *parsed_header(file), data, {});
+        // The zeros are in the file, where the location says.
+        for (const openxisf::detail::block_location& location : attachments(file)) {
+            if (location.size != 32) {
+                EXPECT_TRUE(std::ranges::all_of(std::span(file).subspan(location.position, location.size),
+                                                [](std::byte b) { return b == std::byte{0}; }));
+            }
+        }
+    }
+}
+
+TEST(conformance_writer, a_reserved_image_has_the_checksum_of_its_zeros_when_asked)
+{
+    const std::vector<std::uint16_t> data{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    write_options options = basic_options();
+    options.checksum = openxisf::checksum_algorithm::sha256;
+    for (const sink_kind sink : {sink_kind::rewritable, sink_kind::append_only}) {
+        const std::vector<std::byte> file = written(reserving_writer(options, data), sink);
+        const openxisf::reader unit = open_strictly(file);
+        EXPECT_EQ(unit.metadata().at("XISF:ChecksumAlgorithms").value, property_value("sha256"));
+        expect_reserved_images(unit, *parsed_header(file), data, "sha256");
+    }
+}
+
+TEST(conformance_writer, a_reserved_image_is_never_compressed_or_shuffled)
+{
+    // The image of data is compressed, in subblocks; the reserved ones, whose data come later, are not.
+    const std::vector<std::uint16_t> data(1024, 7);
+    write_options options = basic_options();
+    options.codec = openxisf::codec::zstd;
+    options.byte_shuffle = true;
+    options.subblock_size = 512;
+    options.checksum = openxisf::checksum_algorithm::sha256;
+    for (const sink_kind sink : {sink_kind::rewritable, sink_kind::append_only}) {
+        const std::vector<std::byte> file = written(reserving_writer(options, data), sink);
+        const auto header = parsed_header(file);
+        EXPECT_FALSE(image_element(*header, "data").attribute("compression").empty());
+        const openxisf::reader unit = open_strictly(file);
+        EXPECT_EQ(unit.metadata().at("XISF:CompressionCodecs").value, property_value("zstd+sh"));
+        expect_reserved_images(unit, *header, data, "sha256");
+    }
+}
+
+TEST(conformance_writer, a_reserved_image_goes_to_the_data_blocks_file_of_a_distributed_unit)
+{
+    const std::vector<std::uint16_t> data{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    write_options options = basic_options();
+    options.checksum = openxisf::checksum_algorithm::sha256;
+    for (const sink_kind sink : {sink_kind::rewritable, sink_kind::append_only}) {
+        const openxisf::test::distributed_unit unit =
+            openxisf::test::written_distributed(reserving_writer(options, data), sink);
+        const std::string text = openxisf::test::text(unit.header);
+        pugi::xml_document header;
+        ASSERT_TRUE(header.load_buffer(text.data(), text.size()));
+        EXPECT_TRUE(std::string_view(image_element(header, "reserved").attribute("location").value())
+                        .starts_with("path(@header_dir/unit.xisb):"));
+        expect_reserved_images(openxisf::test::open_distributed(unit, {.strict = true}), header, data, "sha256");
+        EXPECT_TRUE(blocks_file_unused_space_is_zero(unit.blocks));
+    }
+}
+
+TEST(conformance_writer, a_reserved_image_is_checked_like_any_other)
+{
+    openxisf::writer output(basic_options());
+    // Its size, when it is added.
+    EXPECT_TRUE(openxisf::test::throws<openxisf::usage_error>(errc::arithmetic_overflow, [&output] {
+        (void)output.add_reserved_image(
+            simple_image(openxisf::sample_format::uint64, {std::uint64_t{1} << 32, std::uint64_t{1} << 30}, 1));
+    }));
+    EXPECT_TRUE(output.images().empty());
+    // The rest, when it is saved.
+    (void)output.add_reserved_image(simple_image(openxisf::sample_format::uint16, {4, 0}, 1));
+    EXPECT_TRUE(openxisf::test::throws<openxisf::validation_error>(errc::invalid_geometry,
+                                                                   [&output] { (void)written(output); }));
+}
+
+TEST(conformance_writer, progress_counts_the_zeros_of_a_reserved_image)
+{
+    const std::vector<std::uint16_t> data(16);
+    for (const bool checksum : {false, true}) {
+        for (const sink_kind sink : {sink_kind::rewritable, sink_kind::append_only}) {
+            write_options options = basic_options();
+            if (checksum) {
+                options.checksum = openxisf::checksum_algorithm::sha1;
+            }
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> calls;
+            options.progress = [&calls](std::uint64_t done, std::uint64_t total) {
+                calls.emplace_back(done, total);
+                return true;
+            };
+            (void)written(reserving_writer(options, data), sink);
+            // The 32 bytes of data and the 94 of zeros, twice when they are hashed before a header written first.
+            const std::uint64_t total = checksum && sink == sink_kind::append_only ? 2 * 126 : 126;
+            ASSERT_FALSE(calls.empty());
+            EXPECT_EQ(calls.front(), std::make_pair(std::uint64_t{0}, total));
+            EXPECT_EQ(calls.back(), std::make_pair(total, total));
+            EXPECT_TRUE(std::ranges::is_sorted(calls));
+        }
+    }
 }
 
 } // namespace

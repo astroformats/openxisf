@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Ezequiel Ruiz
 
 // Pixel reads from 16 threads at once on one reader, whose images are attached, compressed and embedded, on a source
-// that supports concurrent reads and on one that the library serializes, and in a data blocks file. ThreadSanitizer
-// runs these tests in CI.
+// that supports concurrent reads and on one that the library serializes, and in a data blocks file; and reads of
+// regions. ThreadSanitizer runs these tests in CI.
 
 #include <openxisf/io.h>
 #include <openxisf/reader.h>
@@ -11,10 +11,14 @@
 
 #include "codec/compressed_block.h"
 #include "codec/compression.h"
+#include "container/block_attributes.h"
 #include "core/xoshiro.h"
+#include "crypto/hash.h"
 #include "support/bytes.h"
 #include "support/cursor_source.h"
 #include "support/fixture_builder.h"
+#include "support/opened_unit.h"
+#include "support/regions.h"
 #include "support/threads.h"
 
 #include <gtest/gtest.h>
@@ -151,6 +155,87 @@ TEST(concurrency_pixels, a_source_without_concurrent_reads_is_read_one_thread_at
     EXPECT_FALSE(cursor.overlapped());
 }
 
+// A unit of three images of the samples of values() for regions: in normal storage, attached; in planar storage,
+// compressed with byte shuffling in subblocks of 1 KiB; and in planar storage with a checksum, attached.
+std::vector<std::byte> unit_for_regions()
+{
+    const auto little_endian = [](pixel_storage storage) {
+        std::vector<std::byte> bytes;
+        for (const std::uint16_t value : values(storage)) {
+            bytes.push_back(static_cast<std::byte>(value & 0xFFU));
+            bytes.push_back(static_cast<std::byte>(value >> 8U));
+        }
+        return bytes;
+    };
+    const std::vector<std::byte> planar = little_endian(pixel_storage::planar);
+    const openxisf::detail::compressed_block compressed = openxisf::detail::compress_block(
+        planar, {.codec = openxisf::detail::compression_codec::zlib, .item_size = 2, .max_subblock_size = 1024});
+    const openxisf::detail::block_checksum checksum{
+        .algorithm = openxisf::detail::hash_algorithm::sha1,
+        .digest = openxisf::detail::compute_digest(openxisf::detail::hash_algorithm::sha1, planar)};
+    const std::string geometry = R"(geometry=")" + std::to_string(width) + ":" + std::to_string(height) + R"(:3")";
+    return openxisf::test::file_with_attachments(
+        openxisf::test::header_xml(
+            "<Image " + geometry + R"( sampleFormat="UInt16" colorSpace="RGB" pixelStorage="Normal")" +
+            R"( location="attachment:{0}"/>)" + "<Image " + geometry +
+            R"( sampleFormat="UInt16" colorSpace="RGB" location="attachment:{1}" compression=")" +
+            openxisf::detail::format_compression(compressed.compression) + R"(" subblocks=")" +
+            openxisf::detail::format_subblocks(compressed.compression.subblocks) + R"("/>)" + "<Image " + geometry +
+            R"( sampleFormat="UInt16" colorSpace="RGB" location="attachment:{2}" checksum=")" +
+            openxisf::detail::format_checksum(checksum) + R"("/>)"),
+        {little_endian(pixel_storage::normal), compressed.data, planar});
+}
+
+TEST(concurrency_pixels, threads_read_regions_of_one_reader_at_once)
+{
+    // Every thread reads regions of every image at random, in both storage models, with and without a pitch, into a
+    // vector or into memory of its own, and compares them with the regions of the whole image: from a source in
+    // memory, whose bytes they take in place, and from one read as a file is.
+    for (const bool in_memory : {true, false}) {
+        const reader file(in_memory ? std::unique_ptr<openxisf::input_source>(
+                                          std::make_unique<openxisf::memory_source>(unit_for_regions()))
+                                    : openxisf::test::file_like_source(unit_for_regions()));
+        ASSERT_EQ(file.images().size(), 3U);
+        ASSERT_TRUE(file.diagnostics().empty());
+        const openxisf::geometry image{.dimensions = {width, height}, .channels = channels};
+        std::atomic<int> wrong{0};
+        openxisf::test::run_threads(thread_count, [&](std::size_t t) {
+            openxisf::detail::xoshiro256starstar random({7, 8, 9, t + 1});
+            for (int i = 0; i < reads_per_thread; ++i) {
+                const std::size_t index = random() % 3;
+                const pixel_storage stored = index == 0 ? pixel_storage::normal : pixel_storage::planar;
+                openxisf::pixel_region region{.origin = {random() % width, random() % height}};
+                region.size = {1 + (random() % (width - region.origin[0])),
+                               1 + (random() % (height - region.origin[1]))};
+                region.first_channel = random() % channels;
+                region.channel_count = 1 + (random() % (channels - region.first_channel));
+                const pixel_storage storage = random() % 2 == 0 ? pixel_storage::planar : pixel_storage::normal;
+                const std::uint64_t row =
+                    region.size[0] * (storage == pixel_storage::normal ? region.channel_count : 1);
+                const std::uint64_t pitch = random() % 2 == 0 ? 0 : row + (random() % 5);
+                const std::vector<std::byte> expected =
+                    openxisf::test::region_of(samples(stored), image, 2, stored, region, storage, pitch);
+                try {
+                    const openxisf::pixel_read_options options{.storage = storage, .region = region, .pitch = pitch};
+                    std::vector<std::byte> destination;
+                    if (random() % 2 == 0) {
+                        destination = file.read_pixels(index, options);
+                    } else {
+                        destination.assign(expected.size(), std::byte{0});
+                        file.read_pixels(index, destination, options);
+                    }
+                    if (destination != expected) {
+                        ++wrong;
+                    }
+                } catch (const std::exception&) {
+                    ++wrong;
+                }
+            }
+        });
+        EXPECT_EQ(wrong.load(), 0) << (in_memory ? "in memory" : "read as a file is");
+    }
+}
+
 TEST(concurrency_pixels, threads_read_the_external_blocks_of_one_reader_at_once)
 {
     // A distributed unit, whose data blocks file the library reads one thread at a time.
@@ -176,6 +261,30 @@ TEST(concurrency_pixels, threads_read_the_external_blocks_of_one_reader_at_once)
     ASSERT_NE(cursor, nullptr);
     EXPECT_EQ(read_from_threads(file), 0);
     EXPECT_FALSE(cursor->overlapped());
+}
+
+TEST(concurrency_pixels, threads_open_the_files_of_a_header_only_reader_once_as_they_read)
+{
+    // The first read of an image in a file opens it, while the threads that read the file too wait for it.
+    const std::vector<std::vector<std::byte>> data = image_blocks();
+    const std::vector<std::byte> first = openxisf::test::blocks_file(
+        {{.elements = {{.id = 1, .position = 112, .length = data[0].size()}}}}, {{.position = 112, .data = data[0]}});
+    const std::vector<std::byte> second = openxisf::test::blocks_file(
+        {{.elements = {{.id = 2, .position = 112, .length = data[1].size(), .uncompressed_length = data[0].size()}}}},
+        {{.position = 112, .data = data[1]}});
+    const std::string header = header_of_three_images("path(@header_dir/a.xisb):1", "path(@header_dir/b.xisb):2");
+    std::atomic<int> opened{0};
+    const reader file(
+        std::make_unique<openxisf::memory_source>(openxisf::test::bytes(header)),
+        {.header_only = true, .resolver = [&first, &second, &opened](const openxisf::external_reference& reference) {
+             ++opened;
+             return std::make_unique<openxisf::memory_source>(
+                 std::span<const std::byte>(reference.location == "a.xisb" ? first : second));
+         }});
+    ASSERT_EQ(file.images().size(), 3U);
+    EXPECT_EQ(opened.load(), 0);
+    EXPECT_EQ(read_from_threads(file), 0);
+    EXPECT_EQ(opened.load(), 2);
 }
 
 } // namespace

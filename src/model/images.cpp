@@ -792,7 +792,8 @@ private:
             return false;
         }
         const data_block& data = blocks_[block];
-        if (!data.descriptor) {
+        // An external block that a header-only open did not locate is checked once it is (deferred_external_files).
+        if (!data.descriptor || (is_external(data.descriptor->location.kind) && !data.descriptor->external)) {
             return true;
         }
         const std::uint64_t size = data_size(*data.descriptor);

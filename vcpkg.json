@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "openxisf",
   "description": "Development manifest of OpenXISF: the dependencies of a local build",
-  "homepage": "https://github.com/openxisf/openxisf",
+  "homepage": "https://github.com/astroformats/openxisf",
   "license": "Apache-2.0",
   "builtin-baseline": "3b0aa5ade4cccdbd08bb3fad308328e5a85a9172",
   "dependencies": [

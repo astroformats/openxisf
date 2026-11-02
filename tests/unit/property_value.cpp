@@ -15,6 +15,7 @@
 #include <bit>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <limits>
@@ -82,11 +83,24 @@ TEST(property_value, other_integer_types_map_by_width_and_signedness)
     EXPECT_EQ(property_value(static_cast<unsigned short>(3)).get<std::uint16_t>(), 3U);
 }
 
-TEST(property_value, character_types_are_promoted_to_32_bit_integers)
+// The constructors of the character types are deprecated, which the builds with warnings as errors refuse: the test of
+// what they make silences the warning.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+
+TEST(property_value, character_types_make_the_integers_of_their_promotions)
 {
-    // The behaviour of 1.0, pinned: the constructor of other integer types leaves the character types out, and the
-    // promotions of C++ give them the constructors of the 32-bit integers, so that a character becomes its code. A
-    // wchar_t promotes to unsigned int where it is an unsigned type of 32 bits, as on Linux on arm64.
+    // The behaviour of 1.0, which the deprecated constructors keep until 2.0 deletes them: a character becomes its
+    // code, as the promotions of C++ made it in 1.0, an Int32, or a UInt32 for a char32_t and for a wchar_t where it is
+    // an unsigned type of 32 bits, as on Linux on arm64.
     EXPECT_EQ(property_value('R'), property_value(std::int32_t{82}));
     EXPECT_EQ(property_value(u8'x').type(), property_type::int32);
     EXPECT_EQ(property_value(u'x').type(), property_type::int32);
@@ -94,6 +108,14 @@ TEST(property_value, character_types_are_promoted_to_32_bit_integers)
               std::is_signed_v<decltype(+L'x')> ? property_type::int32 : property_type::uint32);
     EXPECT_EQ(property_value(U'x'), property_value(std::uint32_t{0x78}));
 }
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 TEST(property_value, text_makes_a_string_value)
 {
@@ -151,6 +173,32 @@ TEST(property_value, each_element_type_makes_its_vector_and_matrix_types)
     check_vector<std::complex<float>>(property_type::c32_vector, property_type::c32_matrix);
     check_vector<std::complex<double>>(property_type::c64_vector, property_type::c64_matrix);
     check_vector<complex128>(property_type::c128_vector, property_type::c128_matrix);
+}
+
+TEST(property_value, vectors_and_matrices_of_other_integer_types_map_by_width_and_signedness)
+{
+    // Their elements are copied into the fixed-width type of their width and signedness. long has 64 bits on Linux,
+    // where it is std::int64_t, and on macOS, where std::int64_t is long long, and 32 on Windows; long long and
+    // std::size_t have 64 everywhere.
+    using long_elements = std::conditional_t<sizeof(long) == 8, std::int64_t, std::int32_t>;
+    using unsigned_long_elements = std::make_unsigned_t<long_elements>;
+    EXPECT_EQ(property_value(std::vector<long>{-1, 2}), property_value(std::vector<long_elements>{-1, 2}));
+    EXPECT_EQ(property_value(std::vector<unsigned long>{1, 2}),
+              property_value(std::vector<unsigned_long_elements>{1, 2}));
+    EXPECT_EQ(property_value(std::vector<long long>{-1, 2}), property_value(std::vector<std::int64_t>{-1, 2}));
+    EXPECT_EQ(property_value(std::vector<unsigned long long>{1, 2}), property_value(std::vector<std::uint64_t>{1, 2}));
+    EXPECT_EQ(property_value(std::vector<std::size_t>{1, 2}), property_value(std::vector<std::uint64_t>{1, 2}));
+    EXPECT_EQ(property_value::matrix(1, 2, std::vector<long>{-1, 2}),
+              property_value::matrix(1, 2, std::vector<long_elements>{-1, 2}));
+    EXPECT_EQ(property_value::matrix(2, 1, std::vector<unsigned long long>{1, 2}),
+              property_value::matrix(2, 1, std::vector<std::uint64_t>{1, 2}));
+    EXPECT_TRUE(
+        throws<usage_error>(errc::invalid_argument, [] { (void)property_value::matrix(2, 2, std::vector<long>(3)); }));
+
+    // Characters and bool are not integers here.
+    static_assert(!std::is_constructible_v<property_value, std::vector<char>>);
+    static_assert(!std::is_constructible_v<property_value, std::vector<char32_t>>);
+    static_assert(!std::is_constructible_v<property_value, std::vector<bool>>);
 }
 
 TEST(property_value, a_matrix_needs_rows_times_columns_elements)

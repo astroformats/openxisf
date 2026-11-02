@@ -174,23 +174,75 @@ TEST(conformance_distributed, the_resolver_gets_the_form_and_the_location_of_eac
 
 TEST(conformance_distributed, the_index_of_a_file_is_read_with_the_unit)
 {
-    // header_only leaves the data unloaded, but locates the blocks, so that their sizes are checked.
-    const unit opened = open_header_file(row_image(4, "path(@header_dir/unit.xisb):1"),
-                                         {{"unit.xisb", blocks_file_of({abc()}, {1})}}, {.header_only = true});
+    // A full open locates every block, so that its size is checked.
+    const unit opened =
+        open_header_file(row_image(4, "path(@header_dir/unit.xisb):1"), {{"unit.xisb", blocks_file_of({abc()}, {1})}});
     EXPECT_TRUE(
         single_diagnostic(opened.diagnostics, severity::error, errc::pixel_data_size_mismatch, "/xisf/Image[1]"));
 }
 
-TEST(conformance_distributed, ancillary_data_load_from_the_files_again)
+TEST(conformance_distributed, a_header_only_open_opens_a_file_when_the_pixels_of_an_image_in_it_are_first_read)
 {
+    // Each file once: its index is read then, and the sizes of its blocks checked, whose errors a read of the image
+    // throws, and the diagnostics list once the ancillary data are loaded.
+    const std::string header =
+        header_xml(row_image(4, "path(@header_dir/a.xisb):1") + row_image(3, "path(@header_dir/b.xisb):1") +
+                   row_image(3, "path(@header_dir/a.xisb):2"));
+    const file_map files{{"a.xisb", blocks_file_of({abc(), bytes("def")}, {1, 2})},
+                         {"b.xisb", blocks_file_of({bytes("ghi")}, {1})}};
+    for (const bool strict : {false, true}) {
+        auto opened = std::make_shared<std::vector<std::string>>();
+        reader file = openxisf::test::open_unit(
+            bytes(header), {.strict = strict, .header_only = true, .resolver = memory_resolver(files, opened)});
+        EXPECT_TRUE(no_diagnostics(file.diagnostics()));
+        EXPECT_TRUE(opened->empty());
+
+        EXPECT_EQ(file.read_pixels(1), bytes("ghi"));
+        EXPECT_EQ(*opened, std::vector<std::string>{"b.xisb"});
+        EXPECT_EQ(file.read_pixels(2), bytes("def"));
+        for (int read = 0; read < 2; ++read) {
+            EXPECT_TRUE(throws<openxisf::invalid_data_error>(errc::pixel_data_size_mismatch,
+                                                             [&file] { (void)file.read_pixels(0); }));
+        }
+        EXPECT_EQ(*opened, (std::vector<std::string>{"b.xisb", "a.xisb"}));
+        if (strict) {
+            EXPECT_TRUE(throws<openxisf::invalid_data_error>(errc::pixel_data_size_mismatch,
+                                                             [&file] { file.load_ancillary_data(); }));
+        } else {
+            file.load_ancillary_data();
+            EXPECT_TRUE(single_diagnostic(file.diagnostics(), severity::error, errc::pixel_data_size_mismatch,
+                                          "/xisf/Image[1]"));
+        }
+        EXPECT_EQ(opened->size(), 2U);
+    }
+}
+
+TEST(conformance_distributed, ancillary_data_load_from_the_files_of_the_open)
+{
+    // The file that a read of an image opened is not opened again, and the others once.
     auto opened = std::make_shared<std::vector<std::string>>();
     reader file = openxisf::test::open_unit(
-        bytes(header_xml(bytes_property("Test:Bytes", 3, "path(@header_dir/unit.xisb):1"))),
-        {.header_only = true, .resolver = memory_resolver({{"unit.xisb", blocks_file_of({abc()}, {1})}}, opened)});
+        bytes(header_xml(row_image(3, "path(@header_dir/a.xisb):1") +
+                         bytes_property("Test:Bytes", 3, "path(@header_dir/b.xisb):1"))),
+        {.header_only = true,
+         .resolver = memory_resolver(
+             {{"a.xisb", blocks_file_of({abc()}, {1})}, {"b.xisb", blocks_file_of({bytes("def")}, {1})}}, opened)});
+    EXPECT_EQ(file.read_pixels(0), abc());
     EXPECT_EQ(file.properties().find("Test:Bytes"), nullptr);
     file.load_ancillary_data();
     EXPECT_NE(file.properties().find("Test:Bytes"), nullptr);
-    EXPECT_EQ(*opened, (std::vector<std::string>{"unit.xisb", "unit.xisb"}));
+    EXPECT_EQ(file.read_pixels(0), abc());
+    EXPECT_EQ(*opened, (std::vector<std::string>{"a.xisb", "b.xisb"}));
+}
+
+TEST(conformance_distributed, a_header_only_open_limits_the_files_by_their_order_in_the_header)
+{
+    // A file beyond the limit is not opened, whichever image is read first.
+    reader file = open_header_reader(row_image(3, "path(@header_dir/a.bin)") + row_image(3, "path(@header_dir/b.bin)"),
+                                     {{"a.bin", abc()}, {"b.bin", bytes("def")}},
+                                     {.header_only = true, .limits = {.max_external_files = 1}});
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::too_many_external_files, [&file] { (void)file.read_pixels(1); }));
+    EXPECT_EQ(file.read_pixels(0), abc());
 }
 
 TEST(conformance_distributed, an_external_block_is_verified_and_decompressed_when_it_is_read)
@@ -260,6 +312,14 @@ TEST(conformance_distributed, other_exceptions_of_a_resolver_pass_through)
     }};
     EXPECT_THROW((void)openxisf::test::open_unit(bytes(header_xml(row_image(3, "path(@header_dir/a.xisb)"))), options),
                  openxisf::test::injected_fault);
+    // Through a read of a header-only open too, each time.
+    read_options header_only = options;
+    header_only.header_only = true;
+    const reader file =
+        openxisf::test::open_unit(bytes(header_xml(row_image(3, "path(@header_dir/a.xisb)"))), std::move(header_only));
+    for (int read = 0; read < 2; ++read) {
+        EXPECT_THROW((void)file.read_pixels(0), openxisf::test::injected_fault);
+    }
 }
 
 TEST(conformance_distributed, a_unit_opened_from_a_source_has_no_resolver_by_default)
@@ -324,6 +384,9 @@ TEST(conformance_distributed, the_errors_of_a_resolver_keep_their_class_and_syst
         EXPECT_TRUE(single_diagnostic(file.diagnostics(), severity::error, errc::not_seekable, "/xisf/Image[1]"));
         EXPECT_TRUE(throws_io_error(errc::not_seekable, denied, [&file] { (void)file.read_pixels(0); }));
         EXPECT_TRUE(throws_io_error(errc::not_seekable, denied, [&] { (void)open(resolver, true); }));
+        // A header-only open opens the file when the image is read.
+        const reader deferred = openxisf::test::open_unit(bytes(header), {.header_only = true, .resolver = resolver});
+        EXPECT_TRUE(throws_io_error(errc::not_seekable, denied, [&deferred] { (void)deferred.read_pixels(0); }));
     }
     const openxisf::external_resolver refusing =
         [](const external_reference&) -> std::unique_ptr<openxisf::input_source> {
@@ -549,6 +612,20 @@ TEST(conformance_distributed, the_subblocks_of_an_external_block_add_up_to_its_s
         {{"a.bin", abc()}});
     EXPECT_TRUE(unavailable(opened, "/xisf/Property[1]", errc::invalid_subblocks));
     EXPECT_EQ(opened.diagnostics[0].context.attribute, "subblocks");
+}
+
+TEST(conformance_distributed, an_external_zstd_block_beyond_the_limit_of_its_expansion_is_unavailable)
+{
+    // Its stored size, which the limit multiplies, is known once the file is opened.
+    const std::string property =
+        bytes_property("Test:Bytes", 30, "path(@header_dir/a.bin)", R"(compression="zstd:30")");
+    const unit limited = open_header_file(property, {{"a.bin", abc()}}, {.limits = {.max_zstd_expansion = 9}});
+    ASSERT_TRUE(unavailable(limited, "/xisf/Property[1]", errc::zstd_expansion_too_large));
+    EXPECT_EQ(limited.diagnostics[0].context.attribute, "compression");
+    // Within the limit, the three bytes are not a Zstandard frame.
+    const unit within = open_header_file(property, {{"a.bin", abc()}}, {.limits = {.max_zstd_expansion = 10}});
+    ASSERT_FALSE(within.diagnostics.empty());
+    EXPECT_EQ(within.diagnostics.front().code, errc::corrupt_compressed_data);
 }
 
 TEST(conformance_distributed, an_empty_file_is_an_empty_block)

@@ -28,6 +28,16 @@ namespace {
 // pread() and pwrite() take at most SSIZE_MAX bytes, and Linux transfers at most 2 GiB - 4 KiB in one call.
 constexpr std::size_t max_transfer = std::size_t{1} << 30;
 
+// The access of a directory that is a step of a path: the lookup of its entries alone where the system has it, so that
+// a directory that the process may search but not list is such a step, as it is to realpath().
+#if defined(O_PATH)
+constexpr int directory_access = O_PATH;
+#elif defined(O_SEARCH)
+constexpr int directory_access = O_SEARCH;
+#else
+constexpr int directory_access = O_RDONLY;
+#endif
+
 std::error_code last_error() noexcept
 {
     return {errno, std::system_category()};
@@ -136,6 +146,17 @@ bool is_directory(const std::string& path)
 
 native_file native_file::open_for_reading(const std::string& path)
 {
+    return open_existing(path, false);
+}
+
+native_file native_file::open_for_update(const std::string& path)
+{
+    return open_existing(path, true);
+}
+
+native_file native_file::open_existing(const std::string& path, bool writable)
+{
+    const std::string what = writable ? "cannot open " + path + " for reading and writing" : "cannot open " + path;
     // What is not a regular file is refused before it is opened, since opening a device can act on it, as opening a
     // serial port resets some controllers; and again once it is open, since the path can name another file by then.
     struct stat named{};
@@ -145,14 +166,14 @@ native_file native_file::open_for_reading(const std::string& path)
     // O_NONBLOCK keeps the open of a FIFO from waiting for a writer, and O_NOCTTY the open of a terminal from making it
     // the controlling terminal of the process. Neither has an effect on regular files, which are the only ones
     // accepted.
-    const int handle = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    const int handle = ::open(path.c_str(), (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     if (handle < 0) {
-        fail(errc::open_failed, "cannot open " + path, last_error());
+        fail(errc::open_failed, what, last_error());
     }
     native_file file(handle, path);
     struct stat status{};
     if (::fstat(handle, &status) != 0) {
-        fail(errc::open_failed, "cannot open " + path, last_error());
+        fail(errc::open_failed, what, last_error());
     }
     if (!S_ISREG(status.st_mode)) {
         fail_not_regular(path);
@@ -197,9 +218,52 @@ native_file native_file::find(const std::string& path)
     return {closed_handle, std::move(canonical)};
 }
 
-native_file native_file::reopen_for_reading() const
+native_file native_file::reopen_for_reading(const std::string& directory) const
 {
-    return open_for_reading(name_);
+    const std::string what = "cannot open " + name_;
+    // The directory is the application's, and its path is opened as the system opens it.
+    const int start = ::open(directory.c_str(), directory_access | O_DIRECTORY | O_CLOEXEC);
+    if (start < 0) {
+        fail(errc::open_failed, what, last_error());
+    }
+    native_file current(start, directory);
+    // The steps from the directory to the file, of canonical paths, are names: no . or .., and no link, unless the tree
+    // changed since find(), which a step that is a link now tells.
+    std::string_view rest = std::string_view(name_).substr(std::min(directory.size(), name_.size()));
+    while (rest.starts_with('/')) {
+        rest.remove_prefix(1);
+    }
+    for (std::size_t separator = rest.find('/'); separator != std::string_view::npos; separator = rest.find('/')) {
+        const std::string step(rest.substr(0, separator));
+        rest.remove_prefix(separator + 1);
+        const int next =
+            ::openat(current.handle_, step.c_str(), directory_access | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) {
+            fail(errc::open_failed, what, last_error());
+        }
+        current = native_file(next, directory);
+    }
+    // What is not a regular file is refused before it is opened, as open_for_reading() refuses it.
+    const std::string last(rest);
+    struct stat named{};
+    if (::fstatat(current.handle_, last.c_str(), &named, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISREG(named.st_mode) &&
+        !S_ISLNK(named.st_mode)) {
+        fail_not_regular(name_);
+    }
+    const int handle =
+        ::openat(current.handle_, last.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW);
+    if (handle < 0) {
+        fail(errc::open_failed, what, last_error());
+    }
+    native_file file(handle, name_);
+    struct stat status{};
+    if (::fstat(handle, &status) != 0) {
+        fail(errc::open_failed, what, last_error());
+    }
+    if (!S_ISREG(status.st_mode)) {
+        fail_not_regular(name_);
+    }
+    return file;
 }
 
 std::uint64_t native_file::size() const

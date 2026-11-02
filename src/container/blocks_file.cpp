@@ -115,6 +115,14 @@ private:
             throw_invalid("the nodes of the block index, up to the node at byte " + std::to_string(position) +
                           ", take more bytes than the file has, " + std::to_string(size_));
         }
+        // The elements are counted before they are read: the 2^32 - 1 elements that a node of a sparse file can declare
+        // take minutes to read.
+        if (limits_.max_index_elements != 0 && length > limits_.max_index_elements - counted_) {
+            throw limit_error(errc::too_many_index_elements, "the block index has more than " +
+                                                                 std::to_string(limits_.max_index_elements) +
+                                                                 " elements, the limit");
+        }
+        counted_ += length;
         used_ += node_size;
         read_elements(start, length);
         return next;
@@ -157,8 +165,9 @@ private:
     const std::unordered_set<std::uint64_t>& wanted_;
     const limits& limits_;
     std::uint64_t size_;
-    // The bytes of the file header and of the nodes read so far.
+    // The bytes of the file header and of the nodes read so far, and the number of their elements.
     std::uint64_t used_ = 0;
+    std::uint64_t counted_ = 0;
     std::unordered_set<std::uint64_t> visited_{};
     std::vector<std::byte> buffer_{};
     // The first element of each identifier looked for, the identifiers of several elements, and the reserved fields

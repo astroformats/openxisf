@@ -112,7 +112,8 @@ constexpr std::string_view group_c_procedure =
     "tests/data/pixinsight/make_group_c.js, in automation mode. PixelMath creates the image of sample A2 once, with "
     "the expression (x() + 37*y())/850, and ImageWindow.saveAs() saves it with the format hints 'block-alignment 4096 "
     "properties fits-keywords' and those of each sample. The image is embedded, and the thumbnail of the global "
-    "preferences of the installation is attached.";
+    "preferences of the installation is attached. C1 to C3 and C6 were written by PixInsight 1.9.4, and C4, C5 and "
+    "C7, with SHA-3 checksums, by PixInsight 1.9.6, whose XISF module writes them.";
 
 // XISF:CreationTime, CreatorApplication, CreatorModule and CreatorOS; BlockAlignmentSize and MaxInlineBlockSize, or
 // CompressionCodecs and CompressionLevel; ChecksumAlgorithms and OutputHints.
@@ -298,6 +299,31 @@ std::vector<std::string> d3_blocks()
 
 constexpr std::string_view pixinsight_1_9_5 = "PixInsight 1.9.5-0 build 1706 (XISF module 1.1.3) on Windows 11";
 
+constexpr std::string_view pixinsight_1_9_6 = "PixInsight 1.9.6-0 build 1713 (XISF module 1.2.0) on Windows 11";
+
+// The XISF module of PixInsight 1.9.6 (spec Revision 2): a compressed block is divided into subblocks of 4 MiB, a
+// subblock that its codec does not make shorter is stored as it is, with equal sizes (spec §10.6.1), and a block none
+// of whose subblocks gets shorter is written without compression.
+constexpr std::string_view group_e_procedure =
+    "tests/data/pixinsight/make_group_e.js, in automation mode, with PixInsight 1.9.6. PixelMath creates a 2048 x 1025 "
+    "Gray UInt16 image with the expression iif(y() >= 1023, random(), x()/2047), a ramp along x whose last two rows "
+    "(4096 samples) are noise, and a 64 x 64 image of random(), without rescaling and with truncation, and "
+    "ImageWindow.saveAs() saves them with the format hints 'compression-codec <codec> no-checksums block-alignment "
+    "4096 properties fits-keywords', with 'checksums sha256' for E4. PixInsight divides the block of the ramp into "
+    "a subblock of 4 MiB, compressed, and one of 4096 bytes, which no codec makes shorter and which it stores as it "
+    "is: the high bytes of the noise with byte shuffling, which puts the low bytes of every sample first, or the "
+    "last 2048 samples without it. It writes the block of the noise image without compression. It compresses the "
+    "thumbnail and the processing history property as well, embeds the thumbnail of the ramp, whose compressed "
+    "form fits, and attaches the blocks that it does not embed right after the header, without alignment.";
+
+// The blocks of a sample of group E: the image, its processing history property, its thumbnail, and the
+// XISF:OutputHints property, which PixInsight writes as a block after the metadata properties it generates.
+std::vector<std::string> group_e_blocks(int output_hints)
+{
+    return {"/xisf/Image[1]", "/xisf/Image[1]/Property[1]", "/xisf/Image[1]/Thumbnail[1]",
+            "/xisf/Metadata[1]/Property[" + std::to_string(output_hints) + "]"};
+}
+
 constexpr std::string_view group_d5_procedure =
     "tests/data/pixinsight/make_group_d5.js, in automation mode. PixelMath creates a 400 x 300 Gray UInt16 image with "
     "the expression (x() + y())/1398; the script sets on its main view the properties that ImageSolver 6.5.0 sets for "
@@ -477,8 +503,8 @@ const std::vector<sample>& catalog()
          .set_by_hand = nothing_by_hand,
          .elements = group_b_elements({"Resolution[1]", "Property[1]", "Thumbnail[1]", "Thumbnail[1]/Data[1]"}),
          .blocks = group_b_gray_blocks()},
-        // The XISF module of PixInsight 1.9.4 writes SHA-1, SHA-256 and SHA-512 checksums only, so C4 (SHA3-256) and
-        // C5 (SHA3-512) do not exist; constructed units cover those algorithms (tests/conformance/checksum.cpp).
+        // The XISF module of PixInsight 1.9.4 writes SHA-1, SHA-256 and SHA-512 checksums only; that of 1.9.6 writes
+        // SHA3-256 and SHA3-512 too, which C4, C5 and C7 hold.
         {.id = "C1",
          .file = "c1-gray-u16-sha1.xisf",
          .content = "The image of A2 with SHA-1 checksums, as sha1, on the Data element of the embedded image and on "
@@ -504,6 +530,28 @@ const std::vector<sample>& catalog()
          .set_by_hand = nothing_by_hand,
          .elements = group_c_elements(),
          .blocks = gray_blocks()},
+        {.id = "C4",
+         .file = "c4-gray-u16-sha3-256.xisf",
+         .content = "The image of A2 with SHA3-256 checksums, as sha3-256, written by PixInsight 1.9.6.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_c_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = group_c_elements(),
+         .blocks = gray_blocks(),
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
+        {.id = "C5",
+         .file = "c5-gray-u16-sha3-512.xisf",
+         .content = "The image of A2 with SHA3-512 checksums, as sha3-512, written by PixInsight 1.9.6.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_c_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = group_c_elements(),
+         .blocks = gray_blocks(),
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
         {.id = "C6",
          .file = "c6-gray-u16-zstd-sh-sha256.xisf",
          .content = "The image of A2 compressed with zstd+sh (2-byte items), and a SHA-256 checksum of the compressed "
@@ -517,6 +565,83 @@ const std::vector<sample>& catalog()
          .elements = group_c_elements(),
          .blocks = {"/xisf/Image[1]", "/xisf/Image[1]/Property[1]", "/xisf/Image[1]/Thumbnail[1]",
                     "/xisf/Metadata[1]/Property[8]"}},
+        {.id = "C7",
+         .file = "c7-gray-u16-zstd-sh-sha3-256.xisf",
+         .content = "The image of A2 compressed with zstd+sh (2-byte items), and a SHA3-256 checksum of the compressed "
+                    "data, as C6 with sha3-256 digests on the same blocks, written by PixInsight 1.9.6.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_c_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = group_c_elements(),
+         .blocks = {"/xisf/Image[1]", "/xisf/Image[1]/Property[1]", "/xisf/Image[1]/Thumbnail[1]",
+                    "/xisf/Metadata[1]/Property[8]"},
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
+        // Group E: what the XISF module of PixInsight 1.9.6 writes under Revision 2 of the specification.
+        {.id = "E1",
+         .file = "e1-gray-u16-zstd-sh-stored.xisf",
+         .content =
+             "The ramp image compressed with zstd+sh (2-byte items) in two subblocks, of 4 MiB and of 4096 bytes, "
+             "the second stored as it is: the high bytes of the 4096 noise samples, which byte shuffling puts "
+             "last. Attached.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_e_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = group_b_elements({"Resolution[1]", "Property[1]", "Thumbnail[1]", "Thumbnail[1]/Data[1]"}),
+         .blocks = group_e_blocks(7),
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
+        {.id = "E2",
+         .file = "e2-gray-u16-lz4-sh-stored.xisf",
+         .content = "The ramp image compressed with lz4+sh (2-byte items) in two subblocks, the second of 4096 bytes "
+                    "stored as it is, as in E1. Attached.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_e_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = group_b_elements({"Resolution[1]", "Property[1]", "Thumbnail[1]", "Thumbnail[1]/Data[1]"}),
+         .blocks = group_e_blocks(7),
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
+        {.id = "E3",
+         .file = "e3-gray-u16-zstd-stored.xisf",
+         .content = "The ramp image compressed with zstd, without byte shuffling, in two subblocks, the second of 4096 "
+                    "bytes stored as it is: the last 2048 samples, of the noise. Attached.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_e_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = group_b_elements({"Resolution[1]", "Property[1]", "Thumbnail[1]", "Thumbnail[1]/Data[1]"}),
+         .blocks = group_e_blocks(7),
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
+        {.id = "E4",
+         .file = "e4-gray-u16-zstd-sh-stored-sha256.xisf",
+         .content = "The image of E1, with SHA-256 checksums of the stored bytes, the stored subblock included, as "
+                    "spec §10.6.1 asks. Attached.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_e_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = image_and_metadata({"Resolution[1]", "Property[1]", "Thumbnail[1]", "Thumbnail[1]/Data[1]"}, 8),
+         .blocks = group_e_blocks(8),
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
+        {.id = "E5",
+         .file = "e5-gray-u16-zstd-sh-noise.xisf",
+         .content = "The 64 x 64 image of noise, saved with zstd+sh: no codec makes its block shorter, so PixInsight "
+                    "writes it without compression, attached, and names zstd in XISF:CompressionCodecs for the "
+                    "thumbnail and the processing history, which it compresses.",
+         .producer = pixinsight_1_9_6,
+         .procedure = group_e_procedure,
+         .set_by_hand = nothing_by_hand,
+         .elements = group_b_elements({"Resolution[1]", "Property[1]", "Thumbnail[1]"}),
+         .blocks = group_e_blocks(7),
+         .application = "PixInsight 1.9.6",
+         .module = "XISF module version 1.2.0",
+         .creation_time_as_string = false},
         // D6 and D7 do not exist: the XISF module of PixInsight has no format hint for normal storage,
         // big-endian blocks or CIE L*a*b*, cannot write a complex image, and PixInsight cannot sign XISF units.
         // Constructed units cover them (tests/conformance/image.cpp, byte_order.cpp and signature.cpp).

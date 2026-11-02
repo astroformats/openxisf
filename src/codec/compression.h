@@ -11,7 +11,7 @@
 
 namespace openxisf::detail {
 
-/// The compression codecs of spec §10.6.3 to §10.6.10.
+/// The compression codecs of spec §10.6.4 to §10.6.11.
 enum class compression_codec : std::uint8_t
 {
     zlib,
@@ -37,7 +37,7 @@ struct block_compression
 {
     compression_codec codec = compression_codec::zlib;
     std::uint64_t uncompressed_size = 0;
-    /// The item size of byte shuffling (spec §10.6.2) for the codecs with byte shuffling, and 0 for the others.
+    /// The item size of byte shuffling (spec §10.6.3) for the codecs with byte shuffling, and 0 for the others.
     std::uint64_t item_size = 0;
     /// The subblocks in storage order, or none when the block is compressed as a whole.
     std::vector<subblock> subblocks{};

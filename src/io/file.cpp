@@ -74,6 +74,59 @@ std::string file_source::description() const
     return state_->file.name();
 }
 
+struct file_device::state
+{
+    detail::native_file file;
+    std::uint64_t size = 0;
+};
+
+file_device::file_device(std::string_view path)
+{
+    detail::check_path_argument(path, "the path");
+    detail::native_file file = detail::native_file::open_for_update(std::string(path));
+    const std::uint64_t size = file.size();
+    state_ = std::make_unique<const state>(state{.file = std::move(file), .size = size});
+}
+
+file_device::~file_device() = default;
+
+std::uint64_t file_device::size() const
+{
+    return state_->size;
+}
+
+void file_device::read(std::uint64_t offset, std::span<std::byte> destination) const
+{
+    detail::check_read_range(state_->size, offset, destination.size(), state_->file.name());
+    state_->file.read_at(offset, destination);
+}
+
+void file_device::write(std::uint64_t offset, std::span<const std::byte> data)
+{
+    detail::check_write_range(state_->size, offset, data.size(), state_->file.name());
+    state_->file.write_at(offset, data);
+}
+
+void file_device::flush()
+{
+    state_->file.flush_to_disk();
+}
+
+bool file_device::supports_concurrent_reads() const
+{
+    return true;
+}
+
+bool file_device::supports_concurrent_writes() const
+{
+    return true;
+}
+
+std::string file_device::description() const
+{
+    return state_->file.name();
+}
+
 struct file_sink::state
 {
     state(std::string target_path, std::string temporary_path, detail::native_file temporary_file, bool flush)
@@ -172,6 +225,8 @@ void file_sink::finish()
     state_->check_writable();
     state_->finished = true;
     try {
+        // Another program can have changed the target while the unit was written.
+        detail::check_replaceable(state_->target);
         state_->file.commit(state_->temporary, state_->target, state_->flush_to_disk);
         state_->temporary.clear();
     } catch (...) {

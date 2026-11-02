@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -22,8 +23,8 @@ struct unit_contents
     property_list properties{};
     std::vector<table> tables{};
     std::vector<image_info> images{};
-    /// The pixel data of each image, borrowed from the caller.
-    std::vector<std::span<const std::byte>> pixels{};
+    /// The pixel data of each image, borrowed from the caller; empty for a reserved image, whose data are zeros.
+    std::vector<std::optional<std::span<const std::byte>>> pixels{};
 };
 
 /// The metadata properties that the writer writes itself, from its options and from what it writes (spec §11.4).

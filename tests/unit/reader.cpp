@@ -103,6 +103,28 @@ TEST(reader, the_limits_of_the_options_apply)
         errc::too_many_xml_elements, [&header] { (void)open_header(header, {.limits = {.max_xml_elements = 3}}); }));
     EXPECT_TRUE(throws<openxisf::limit_error>(
         errc::xml_too_deep, [&header] { (void)open_header(header, {.limits = {.max_xml_depth = 2}}); }));
+    // The two properties of the Metadata element are objects of the model, and a lenient open fails beyond them too.
+    EXPECT_TRUE(throws<openxisf::limit_error>(
+        errc::too_many_model_objects, [&header] { (void)open_header(header, {.limits = {.max_model_objects = 1}}); }));
+    EXPECT_TRUE(no_diagnostics(open_header(header, {.limits = {.max_model_objects = 2}}).diagnostics()));
+}
+
+// Twenty problems under a cap of five: four diagnostics, and a fifth that counts itself and the fifteen others.
+TEST(reader, the_options_cap_the_diagnostics)
+{
+    std::string body;
+    for (std::size_t i = 0; i < 20; ++i) {
+        body += "<Unknown/>";
+    }
+    const std::string header = header_xml(body);
+    const reader capped = open_header(header, {.limits = {.max_diagnostics = 5}});
+    const std::span<const openxisf::diagnostic> diagnostics = capped.diagnostics();
+    ASSERT_EQ(diagnostics.size(), 5U);
+    EXPECT_EQ(diagnostics[3].context.element, "/xisf/Unknown[4]");
+    EXPECT_EQ(diagnostics.back().severity, severity::warning);
+    EXPECT_EQ(diagnostics.back().code, errc::unknown_element);
+    EXPECT_EQ(diagnostics.back().message, "16 more problems were found, which are not listed");
+    EXPECT_EQ(open_header(header, {.limits = {.max_diagnostics = 0}}).diagnostics().size(), 20U);
 }
 
 // -----------------------------------------------------------------------------------------------------------------

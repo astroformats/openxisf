@@ -81,6 +81,14 @@ constexpr std::uint32_t image_children =
 constexpr std::uint32_t root_children = (image_children & ~bit(element_kind::data)) | bit(element_kind::metadata) |
                                         bit(element_kind::image) | bit(element_kind::structure);
 
+// The elements that the reader makes objects of, counted against limits::max_model_objects. The rows and cells of
+// tables are left to limits::max_xml_elements, so that a large table needs that limit alone raised.
+constexpr std::uint32_t model_objects =
+    bit(element_kind::image) | bit(element_kind::thumbnail) | bit(element_kind::property) | bit(element_kind::table) |
+    bit(element_kind::field) | bit(element_kind::fits_keyword) | bit(element_kind::icc_profile) |
+    bit(element_kind::rgb_working_space) | bit(element_kind::display_function) | bit(element_kind::color_filter_array) |
+    bit(element_kind::resolution);
+
 // The elements that an element can contain (spec §11), or the root element when parent is empty. A Data element holds
 // an embedded block (spec §10.3).
 std::uint32_t allowed_children(std::optional<element_kind> parent) noexcept
@@ -203,7 +211,7 @@ void register_uid(const unit_outline& outline, std::size_t index, uid_table& uid
 }
 
 // Visits the elements in document order, without recursion. Elements that are not in the outline are not entered.
-void walk(unit_outline& outline, uid_table& uids, diagnostic_log& log)
+void walk(unit_outline& outline, uid_table& uids, const limits& limits, diagnostic_log& log)
 {
     struct frame
     {
@@ -228,6 +236,7 @@ void walk(unit_outline& outline, uid_table& uids, diagnostic_log& log)
     namespace_scope scope;
     scope.enter(outline.root);
     enter(no_element, outline.root);
+    std::uint64_t objects = 0;
     while (!stack.empty()) {
         frame& top = stack.back();
         if (top.next.empty()) {
@@ -260,6 +269,15 @@ void walk(unit_outline& outline, uid_table& uids, diagnostic_log& log)
 
         const std::size_t index = outline.elements.size();
         outline.elements.push_back({.kind = *kind, .node = node, .parent = parent, .position = position});
+        if ((model_objects & bit(*kind)) != 0) {
+            ++objects;
+            if (limits.max_model_objects != 0 && objects > limits.max_model_objects) {
+                throw limit_error(errc::too_many_model_objects,
+                                  "the header describes more than " + std::to_string(limits.max_model_objects) +
+                                      " objects, the limit",
+                                  {.element = outline.path(index)});
+            }
+        }
         if (is_core_element(*kind)) {
             register_uid(outline, index, uids, log);
         }
@@ -329,11 +347,11 @@ std::string unit_outline::path(std::size_t index) const
     return child_path(*this, element.parent, element.node.name(), element.position);
 }
 
-unit_outline build_outline(const pugi::xml_node& root, diagnostic_log& log)
+unit_outline build_outline(const pugi::xml_node& root, const limits& limits, diagnostic_log& log)
 {
     unit_outline outline{.root = root, .root_path = "/" + std::string(local_name(root.name()))};
     uid_table uids;
-    walk(outline, uids, log);
+    walk(outline, uids, limits, log);
     resolve_references(outline, uids, log);
     return outline;
 }

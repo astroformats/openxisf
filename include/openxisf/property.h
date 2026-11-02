@@ -209,8 +209,8 @@ struct property_format
 
 /// The C++ types of the elements of vector and matrix properties. Integer elements are of the fixed-width types alone,
 /// std::int8_t to std::uint64_t, which are other C++ types on other platforms: a std::vector of long, long long or
-/// std::size_t is a vector of one of them on some platforms and of none on others. Convert such a vector to one of
-/// the fixed-width types.
+/// std::size_t is a vector of one of them on some platforms and of none on others, which property_value converts to
+/// one of them.
 template <typename T>
 concept property_element =
     std::same_as<T, std::int8_t> || std::same_as<T, std::uint8_t> || std::same_as<T, std::int16_t> ||
@@ -218,6 +218,20 @@ concept property_element =
     std::same_as<T, std::int64_t> || std::same_as<T, std::uint64_t> || std::same_as<T, int128> ||
     std::same_as<T, uint128> || std::same_as<T, float> || std::same_as<T, double> || std::same_as<T, float128> ||
     std::same_as<T, std::complex<float>> || std::same_as<T, std::complex<double>> || std::same_as<T, complex128>;
+
+// The types that the constructors of property_value tell apart from the fixed-width integers.
+namespace detail {
+
+template <typename T>
+concept character = std::same_as<T, char> || std::same_as<T, wchar_t> || std::same_as<T, char8_t> ||
+                    std::same_as<T, char16_t> || std::same_as<T, char32_t>;
+
+// An integer type that is not one of the fixed-width types, such as long long where std::int64_t is long, and not bool
+// or a character type.
+template <typename T>
+concept other_integer = std::integral<T> && !property_element<T> && !std::same_as<T, bool> && !character<T>;
+
+} // namespace detail
 
 #if defined(_MSC_VER)
 // property_value and property_list hold standard-library members, which cl reports for an exported class. A C++
@@ -278,14 +292,17 @@ public:
     property_value(std::uint64_t value) noexcept;
 
     /// An integer of another C++ type, such as long long where std::int64_t is long: the integer type of its width and
-    /// signedness. The character types are not taken for integers here, but a character is promoted to an int, or a
-    /// char32_t to an unsigned int, as a wchar_t is where it is an unsigned type of 32 bits (Linux on arm64), and
-    /// makes an Int32 or a UInt32 value: set("Instrument:Filter", 'R') sets the number 82, where "R" sets a String.
-    template <typename T>
-        requires std::integral<T> && (!std::same_as<T, bool>) && (!std::same_as<T, char>) &&
-                 (!std::same_as<T, wchar_t>) && (!std::same_as<T, char8_t>) && (!std::same_as<T, char16_t>) &&
-                 (!std::same_as<T, char32_t>)
-    property_value(T value) noexcept : property_value(fixed_width(value))
+    /// signedness.
+    template <detail::other_integer T> property_value(T value) noexcept : property_value(fixed_width(value)) {}
+
+    /// A character, as 1.0 made it by the promotions of C++: an Int32 value of its code, or a UInt32 for a char32_t
+    /// and for a wchar_t where it is an unsigned type of 32 bits (Linux on arm64). set("Instrument:Filter", 'R') sets
+    /// the number 82, where "R" sets a String.
+    /// @deprecated 2.0 deletes this constructor: give a String, such as "R", or the integer meant.
+    template <detail::character T>
+    [[deprecated("a character is an integer here: give a String (\"R\") or the integer meant")]]
+    property_value(T value) noexcept
+        : property_value(+value)
     {}
 
     property_value(int128 value) noexcept;
@@ -309,6 +326,13 @@ public:
         : type_(vector_type<T>()), value_(std::in_place_type<std::vector<T>>, std::move(elements))
     {}
 
+    /// A vector of integers of another C++ type, such as std::vector<long>: a copy of them as the integer type of their
+    /// width and signedness. A std::vector<long> makes an I64Vector on Linux and macOS, where long has 64 bits, and an
+    /// I32Vector on Windows, where it has 32.
+    template <detail::other_integer T>
+    property_value(const std::vector<T>& elements) : property_value(fixed_width_elements(elements))
+    {}
+
     /// A matrix value, with its elements in row order.
     /// @throws usage_error when elements does not have rows * columns elements.
     template <property_element T>
@@ -320,6 +344,16 @@ public:
         result.rows_ = rows;
         result.columns_ = columns;
         return result;
+    }
+
+    /// A matrix of integers of another C++ type, with its elements in row order, copied as the vector constructor of
+    /// such integers copies them.
+    /// @throws usage_error when elements does not have rows * columns elements.
+    template <detail::other_integer T>
+    [[nodiscard]] static property_value matrix(std::uint64_t rows, std::uint64_t columns,
+                                               const std::vector<T>& elements)
+    {
+        return matrix(rows, columns, fixed_width_elements(elements));
     }
 
     /// A Float128 scalar, kept as text: a floating point value of spec §8.3.3 within the range of Float128, without the
@@ -408,6 +442,12 @@ private:
                 return static_cast<std::uint64_t>(value);
             }
         }
+    }
+
+    // A copy of the elements as the integer type of their width and signedness.
+    template <typename T> static auto fixed_width_elements(const std::vector<T>& elements)
+    {
+        return std::vector<decltype(fixed_width(T{}))>(elements.begin(), elements.end());
     }
 
     template <property_element T> static constexpr property_type vector_type() noexcept

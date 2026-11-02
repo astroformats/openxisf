@@ -507,6 +507,49 @@ std::optional<std::size_t> tag_end(std::string_view text, std::size_t start) noe
     return std::nullopt;
 }
 
+std::optional<text_span> attribute_text(std::string_view text, std::size_t start, std::string_view name) noexcept
+{
+    const auto skip_white_space = [text](std::size_t i) {
+        while (i < text.size() && is_xml_white_space(text[i])) {
+            ++i;
+        }
+        return i;
+    };
+    // The name of the element, then attribute after attribute: a name, an equals sign with white space around it, and
+    // a value in quotes, which holds no '<' and no quote of its kind.
+    std::size_t i = start + 1;
+    while (i < text.size() && !is_xml_white_space(text[i]) && text[i] != '>' && text[i] != '/') {
+        ++i;
+    }
+    while (true) {
+        i = skip_white_space(i);
+        if (i >= text.size() || text[i] == '>' || text[i] == '/') {
+            return std::nullopt;
+        }
+        const std::size_t name_start = i;
+        while (i < text.size() && !is_xml_white_space(text[i]) && text[i] != '=') {
+            ++i;
+        }
+        const std::string_view found = text.substr(name_start, i - name_start);
+        i = skip_white_space(i);
+        if (i >= text.size() || text[i] != '=') {
+            return std::nullopt;
+        }
+        i = skip_white_space(i + 1);
+        if (i >= text.size() || (text[i] != '"' && text[i] != '\'')) {
+            return std::nullopt;
+        }
+        const std::size_t close = text.find(text[i], i + 1);
+        if (close == std::string_view::npos) {
+            return std::nullopt;
+        }
+        if (found == name) {
+            return text_span{.offset = i + 1, .length = close - i - 1};
+        }
+        i = close + 1;
+    }
+}
+
 std::size_t element_length(std::string_view text, std::size_t start)
 {
     std::size_t depth = 0;

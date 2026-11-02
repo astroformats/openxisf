@@ -35,6 +35,7 @@ endfunction()
 
 openxisf_add_test_executable(openxisf_tests
     concurrency/astrometry.cpp
+    concurrency/editor.cpp
     concurrency/io.cpp
     concurrency/pixels.cpp
     concurrency/writer.cpp
@@ -47,6 +48,7 @@ openxisf_add_test_executable(openxisf_tests
     conformance/compression.cpp
     conformance/display_function.cpp
     conformance/distributed.cpp
+    conformance/editor.cpp
     conformance/fits_keyword.cpp
     conformance/header.cpp
     conformance/icc.cpp
@@ -66,6 +68,7 @@ openxisf_add_test_executable(openxisf_tests
     samples/group_b.cpp
     samples/group_c.cpp
     samples/group_d.cpp
+    samples/group_e.cpp
     samples/large.cpp
     samples/rewrite.cpp
     samples/sample_catalog.cpp
@@ -90,6 +93,7 @@ openxisf_add_test_executable(openxisf_tests
     unit/container.cpp
     unit/data_block.cpp
     unit/data_encoding.cpp
+    unit/device_io.cpp
     unit/diagnostic_log.cpp
     unit/display.cpp
     unit/distortion_model.cpp
@@ -112,6 +116,8 @@ openxisf_add_test_executable(openxisf_tests
     unit/outline.cpp
     unit/paths.cpp
     unit/pixel_layout.cpp
+    unit/pixel_region.cpp
+    unit/pixel_writes.cpp
     unit/pixels.cpp
     unit/property_catalog.cpp
     unit/property_data.cpp
@@ -154,6 +160,7 @@ if(allocation_tests)
         allocation/block_attributes.cpp
         allocation/compressed_block.cpp
         allocation/data_block.cpp
+        allocation/editor.cpp
         allocation/property.cpp
         allocation/reader.cpp
         allocation/writer.cpp

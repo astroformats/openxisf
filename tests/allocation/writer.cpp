@@ -66,4 +66,36 @@ TEST(writer, an_image_that_cannot_be_added_leaves_the_writer_as_it_was)
     EXPECT_EQ(unit.read_pixels<std::uint8_t>(2), third);
 }
 
+// The zeros of a reserved image are written, and hashed, from one piece of a few MiB: no buffer of the size of the
+// image is allocated, with a checksum or without, to a sink that can rewrite or to one that cannot.
+TEST(writer, a_reserved_image_allocates_no_buffer_of_its_size)
+{
+    if (!openxisf::test::counts_the_allocations_of_the_library()) {
+        GTEST_SKIP() << "the allocations of the library are not counted in this build";
+    }
+    openxisf::image_info info;
+    info.geometry = {.dimensions = {4096, 4096}, .channels = 1};
+    info.sample_format = openxisf::sample_format::uint32;
+    constexpr std::uint64_t size = std::uint64_t{64} << 20;
+    for (const bool checksum : {false, true}) {
+        for (const bool rewritable : {false, true}) {
+            openxisf::write_options options{.creator_application = "OpenXISF tests 1.0",
+                                            .creation_time = openxisf::date_time{.year = 2026}};
+            if (checksum) {
+                options.checksum = openxisf::checksum_algorithm::sha1;
+            }
+            openxisf::writer output(options);
+            (void)output.add_reserved_image(info);
+            std::uint64_t written = 0;
+            openxisf::callback_sink sink(
+                [&written](std::span<const std::byte> data) { written += data.size(); },
+                rewritable ? openxisf::callback_sink::rewrite_function([](std::uint64_t, std::span<const std::byte>) {})
+                           : openxisf::callback_sink::rewrite_function());
+            const std::uint64_t allocated = openxisf::test::bytes_allocated_by([&] { output.save(sink); });
+            EXPECT_GT(written, size) << checksum << rewritable;
+            EXPECT_LT(allocated, std::uint64_t{8} << 20) << checksum << rewritable;
+        }
+    }
+}
+
 } // namespace

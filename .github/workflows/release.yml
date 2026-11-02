@@ -11,13 +11,14 @@ permissions:
   contents: read
 
 jobs:
-  # Before the matrix, so that a wrong tag fails at once.
+  # First, so that a wrong tag fails at once.
   version:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The README status in the form of a release, "**Status: X.Y.Z.**": a version in development is not released.
       - name: The tag matches the version of the project
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -27,16 +28,52 @@ jobs:
           echo "tag: $tag, CMakeLists.txt: $project, vcpkg port: $port, README status: $status"
           test "$tag" = "$project" && test "$tag" = "$port" && test "$tag" = "$status"
 
-  # Everything that runs on a pull request, with a longer fuzz run: the full platform matrix in a public
-  # repository, and the Linux jobs in a private one, whose Windows and macOS jobs run by hand (ci.yml).
-  ci:
+  # The commit of the tag is the merge of a publication, which ci.yml tested when it was pushed to main: the release
+  # needs that run to have passed, and waits for it, rather than run the whole matrix on the same commit again. A run
+  # that a later push to main cancelled leaves none; ci.yml can then be run on the tag by hand, and this job again.
+  tested:
     needs: version
-    uses: ./.github/workflows/ci.yml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: read
+    steps:
+      - name: The run of ci.yml on the commit passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          # The run appears within seconds of the push of the merge.
+          runs=""
+          for _ in $(seq 1 20); do
+            runs=$(gh run list -R "$REPOSITORY" --workflow ci.yml --commit "$COMMIT" --limit 20 \
+              --json databaseId,status,conclusion --jq '.[] | "\(.databaseId) \(.status) \(.conclusion)"')
+            [ -n "$runs" ] && break
+            sleep 30
+          done
+          echo "runs of ci.yml on $COMMIT:"
+          echo "$runs"
+          if echo "$runs" | grep -q ' completed success$'; then
+            exit 0
+          fi
+          pending=$(echo "$runs" | awk '$2 != "completed" { print $1; exit }')
+          if [ -n "$pending" ]; then
+            gh run watch "$pending" -R "$REPOSITORY" --interval 60 --exit-status
+            exit
+          fi
+          echo "::error::No run of ci.yml passed on $COMMIT. Run it on the tag (gh workflow run ci.yml --ref $GITHUB_REF_NAME), then this job again."
+          exit 1
+
+  # The longer fuzz run of a release, which ci.yml gives a minute.
+  fuzz:
+    needs: version
+    uses: ./.github/workflows/fuzz.yml
     with:
       fuzz-seconds: 600
 
   docs:
-    needs: ci
+    needs: [tested, fuzz]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

@@ -132,6 +132,8 @@ struct resolution
 /// Thumbnail element is an Image element under another name, without bounds, colour filter array or thumbnail, so the
 /// members are those of image_info that it can have, but with other defaults: UInt8 samples and the RGB colour space,
 /// where an image_info has UInt16 and Gray, the colour space that the specification gives an element without one.
+/// 2.0 gives a thumbnail the defaults of image_info: a thumbnail that sets its sample format and colour space is
+/// written the same by both.
 struct thumbnail
 {
     openxisf::geometry geometry{};

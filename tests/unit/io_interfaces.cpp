@@ -46,12 +46,36 @@ private:
     std::uint64_t position_ = 0;
 };
 
-TEST(input_source, reads_one_at_a_time_and_has_no_description_by_default)
+TEST(input_source, reads_one_at_a_time_through_read_alone_and_has_no_description_by_default)
 {
     const minimal_source source;
 
     EXPECT_FALSE(source.supports_concurrent_reads());
+    EXPECT_TRUE(source.bytes().empty());
     EXPECT_EQ(source.description(), "");
+}
+
+class minimal_device final : public openxisf::random_access_device
+{
+public:
+    std::uint64_t size() const override
+    {
+        return 0;
+    }
+
+    void read(std::uint64_t /*offset*/, std::span<std::byte> /*destination*/) const override {}
+
+    void write(std::uint64_t /*offset*/, std::span<const std::byte> /*data*/) override {}
+};
+
+TEST(random_access_device, is_called_one_call_at_a_time_and_flushes_without_doing_anything_by_default)
+{
+    minimal_device device;
+
+    EXPECT_FALSE(device.supports_concurrent_reads());
+    EXPECT_FALSE(device.supports_concurrent_writes());
+    EXPECT_EQ(device.description(), "");
+    device.flush();
 }
 
 TEST(output_sink, cannot_rewrite_and_finishes_without_doing_anything_by_default)

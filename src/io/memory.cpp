@@ -32,6 +32,11 @@ bool memory_source::supports_concurrent_reads() const
     return true;
 }
 
+std::span<const std::byte> memory_source::bytes() const
+{
+    return data_;
+}
+
 void memory_sink::write(std::span<const std::byte> data)
 {
     data_.insert(data_.end(), data.begin(), data.end());
@@ -61,6 +66,36 @@ std::span<const std::byte> memory_sink::data() const noexcept
 std::vector<std::byte> memory_sink::release() noexcept
 {
     return std::exchange(data_, {});
+}
+
+memory_device::memory_device(std::span<std::byte> data) noexcept : data_(data) {}
+
+std::uint64_t memory_device::size() const
+{
+    return data_.size();
+}
+
+void memory_device::read(std::uint64_t offset, std::span<std::byte> destination) const
+{
+    detail::check_read_range(data_.size(), offset, destination.size(), {});
+    std::ranges::copy(data_.subspan(detail::checked_cast<std::size_t>(offset), destination.size()),
+                      destination.begin());
+}
+
+void memory_device::write(std::uint64_t offset, std::span<const std::byte> data)
+{
+    detail::check_write_range(data_.size(), offset, data.size(), {});
+    std::ranges::copy(data, data_.begin() + static_cast<std::ptrdiff_t>(offset));
+}
+
+bool memory_device::supports_concurrent_reads() const
+{
+    return true;
+}
+
+bool memory_device::supports_concurrent_writes() const
+{
+    return true;
 }
 
 } // namespace openxisf

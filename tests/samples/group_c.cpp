@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Ezequiel Ruiz
 
-// The samples of group C: the image of sample A2 with the block checksums that PixInsight writes (spec §10.5), once
-// with compression (spec §10.6.1).
+// The samples of group C: the image of sample A2 with the block checksums that PixInsight writes (spec §10.5), twice
+// with compression (spec §10.6.2). C1 to C3 and C6 come from PixInsight 1.9.4, C4, C5 and C7, with SHA-3, from 1.9.6.
 
 #include <openxisf/error.h>
 #include <openxisf/io.h>
 #include <openxisf/reader.h>
+#include <openxisf/writer.h>
 
 #include "container/block_attributes.h"
 #include "container/data_block.h"
@@ -47,7 +48,7 @@ std::vector<std::byte> read_sample(const sample& unit)
 std::vector<sample> uncompressed_samples()
 {
     std::vector<sample> found;
-    for (const std::string_view id : {"C1", "C2", "C3"}) {
+    for (const std::string_view id : {"C1", "C2", "C3", "C4", "C5"}) {
         found.push_back(sample_by_id(id));
     }
     return found;
@@ -79,7 +80,7 @@ class samples_group_c_uncompressed : public testing::TestWithParam<sample>
 {};
 
 // The pattern image of the samples (sample_catalog.cpp): sample i, in storage order, is i/850 of the range of UInt16,
-// as PixInsight rounds it. The image of C6 is decompressed.
+// as PixInsight rounds it. The images of C6 and C7 are decompressed.
 TEST_P(samples_group_c, the_image_block_holds_the_pattern)
 {
     const unit opened(std::make_unique<openxisf::file_source>(openxisf::test::sample_path(GetParam())), {});
@@ -92,6 +93,37 @@ TEST_P(samples_group_c, the_image_block_holds_the_pattern)
         const double expected = std::round(static_cast<double>(i) / 850.0 * 65535.0);
         EXPECT_LE(std::abs(value - expected), 1.0) << "sample " << i;
     }
+}
+
+// The image block that make_group_c.js asked PixInsight for: embedded, with the checksum of the sample, and for C6
+// and C7 compressed as the image of sample B9 is.
+TEST_P(samples_group_c, the_block_names_the_checksum_algorithm_of_the_sample)
+{
+    constexpr std::uint64_t size = std::uint64_t{37} * 23 * 2;
+    openxisf::block_info expected{
+        .location = openxisf::block_location::embedded, .stored_size = size, .uncompressed_size = size};
+    const std::string_view id = GetParam().id;
+    if (id == "C1") {
+        expected.checksum = openxisf::checksum_algorithm::sha1;
+    } else if (id == "C2") {
+        expected.checksum = openxisf::checksum_algorithm::sha256;
+    } else if (id == "C3") {
+        expected.checksum = openxisf::checksum_algorithm::sha512;
+    } else if (id == "C4") {
+        expected.checksum = openxisf::checksum_algorithm::sha3_256;
+    } else if (id == "C5") {
+        expected.checksum = openxisf::checksum_algorithm::sha3_512;
+    } else {
+        ASSERT_TRUE(id == "C6" || id == "C7") << id;
+        expected.codec = openxisf::codec::zstd;
+        expected.byte_shuffle = true;
+        expected.subblock_size = size;
+        expected.subblock_count = 1;
+        expected.checksum = id == "C6" ? openxisf::checksum_algorithm::sha256 : openxisf::checksum_algorithm::sha3_256;
+        expected.stored_size = 1277;
+    }
+    const openxisf::reader file(openxisf::test::sample_path(GetParam()), {.strict = true});
+    EXPECT_EQ(file.block(0), expected);
 }
 
 TEST_P(samples_group_c_uncompressed, a_change_in_the_embedded_image_fails_its_checksum)
@@ -111,7 +143,7 @@ INSTANTIATE_TEST_SUITE_P(pixinsight, samples_group_c, testing::ValuesIn(openxisf
 INSTANTIATE_TEST_SUITE_P(pixinsight, samples_group_c_uncompressed, testing::ValuesIn(uncompressed_samples()),
                          sample_name);
 
-// Spec §10.6.1: the checksum of a compressed block covers the compressed data.
+// Spec §10.6.2: the checksum of a compressed block covers the compressed data.
 TEST(samples_c6, the_checksum_of_a_compressed_block_covers_the_stored_bytes)
 {
     const unit opened(std::make_unique<openxisf::file_source>(openxisf::test::sample_path(sample_by_id("C6"))),

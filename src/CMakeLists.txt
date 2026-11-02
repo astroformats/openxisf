@@ -55,6 +55,7 @@ set(internal_sources
     crypto/sha3.cpp
     io/paths.cpp
     io/range_check.cpp
+    io/thread_safe_device.cpp
     io/thread_safe_source.cpp
     model/ancillary.cpp
     model/ancillary_attributes.cpp
@@ -67,6 +68,7 @@ set(internal_sources
     model/images.cpp
     model/outline.cpp
     model/pixel_layout.cpp
+    model/pixel_writes.cpp
     model/pixels.cpp
     model/properties.cpp
     model/property_catalog.cpp
@@ -94,6 +96,7 @@ set(public_sources
     algorithms/display.cpp
     algorithms/format.cpp
     algorithms/orientation.cpp
+    editor.cpp
     image.cpp
     property.cpp
     reader.cpp
@@ -127,6 +130,14 @@ set_target_properties(openxisf PROPERTIES
     SOVERSION "${OPENXISF_SOVERSION}"
     # The Debug library has a name of its own, so that Debug and Release builds install side by side in one prefix.
     DEBUG_POSTFIX d)
+
+# The Windows DLL is named after the minor version, as the soname is elsewhere (openxisf-1.1.dll, libopenxisf-1.1.dll
+# with MinGW), so that a program loads the DLL of the minor version that it was built against. The import library keeps
+# the name of the library, as libopenxisf.so does, so that programs link with it as before. These are the names that
+# DLL_NAME_WITH_SOVERSION gives from CMake 3.27 on.
+if(WIN32 AND OPENXISF_SHARED)
+    set_target_properties(openxisf PROPERTIES RUNTIME_OUTPUT_NAME "openxisf-${OPENXISF_SOVERSION}")
+endif()
 
 # windows.h without the min and max macros, which break the standard headers included after it.
 set(windows_definitions NOMINMAX WIN32_LEAN_AND_MEAN)
