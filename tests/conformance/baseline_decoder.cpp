@@ -136,7 +136,7 @@ TEST(conformance_baseline_decoder, reads_data_blocks_in_both_byte_orders)
 
 TEST(conformance_baseline_decoder, decompresses_every_standard_codec)
 {
-    // Spec §10.6.3 to §10.6.10, Table 10: each codec, with and without byte shuffling.
+    // Spec §10.6.4 to §10.6.11, Table 10: each codec, with and without byte shuffling.
     // The blocks are little-endian, the default byte order, whatever the host's.
     std::vector<std::uint16_t> samples(300);
     std::vector<std::byte> data;
@@ -168,6 +168,44 @@ TEST(conformance_baseline_decoder, decompresses_every_standard_codec)
     EXPECT_TRUE(no_diagnostics(file.diagnostics()));
     ASSERT_EQ(file.images().size(), 8U);
     for (std::size_t i = 0; i < 8; ++i) {
+        EXPECT_EQ(file.read_pixels<std::uint16_t>(i), samples) << i;
+    }
+}
+
+TEST(conformance_baseline_decoder, reads_data_blocks_with_uncompressed_subblocks)
+{
+    // Spec §7.2 and §10.6.1 (Revision 2): a subblock whose compressed and uncompressed sizes are equal is stored as
+    // it is. 600 samples that repeat, which every codec shortens, and 600 of noise, which none does, in subblocks
+    // of 1200 bytes.
+    std::vector<std::uint16_t> samples(1200);
+    std::vector<std::byte> data;
+    data.reserve(samples.size() * 2);
+    std::uint32_t state = 3;
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        state = (state * 1'664'525U) + 1'013'904'223U;
+        samples[i] = i < 600 ? static_cast<std::uint16_t>((i % 16) * 1000) : static_cast<std::uint16_t>(state >> 16U);
+        data.push_back(static_cast<std::byte>(samples[i] & 0xFFU));
+        data.push_back(static_cast<std::byte>(samples[i] >> 8U));
+    }
+
+    std::string body;
+    std::vector<std::vector<std::byte>> blocks;
+    for (const auto& [codec, name] :
+         {std::pair{compression_codec::zlib, "zlib"}, std::pair{compression_codec::lz4, "lz4"},
+          std::pair{compression_codec::lz4hc, "lz4hc"}, std::pair{compression_codec::zstd, "zstd"}}) {
+        const compressed_block compressed = compress_block(data, {.codec = codec, .max_subblock_size = 1200});
+        ASSERT_EQ(compressed.compression.subblocks.size(), 2U) << name;
+        ASSERT_LT(compressed.compression.subblocks[0].compressed_size, 1200U) << name;
+        ASSERT_EQ(compressed.compression.subblocks[1].compressed_size, 1200U) << name;
+        body += R"(<Image geometry="1200:1:1" sampleFormat="UInt16" location="attachment:{)" +
+                std::to_string(blocks.size()) + R"(}" compression=")" + name + R"(:2400" subblocks=")" +
+                std::to_string(compressed.compression.subblocks[0].compressed_size) + R"(,1200:1200,1200"/>)";
+        blocks.push_back(compressed.data);
+    }
+    const reader file = open_attached(body, blocks);
+    EXPECT_TRUE(no_diagnostics(file.diagnostics()));
+    ASSERT_EQ(file.images().size(), 4U);
+    for (std::size_t i = 0; i < 4; ++i) {
         EXPECT_EQ(file.read_pixels<std::uint16_t>(i), samples) << i;
     }
 }

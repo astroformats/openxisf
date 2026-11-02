@@ -4,9 +4,9 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(openxisf
-    VERSION 1.0.1
+    VERSION 1.1.0
     DESCRIPTION "C++20 library for reading and writing XISF files"
-    HOMEPAGE_URL "https://github.com/openxisf/openxisf"
+    HOMEPAGE_URL "https://github.com/astroformats/openxisf"
     LANGUAGES CXX)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)

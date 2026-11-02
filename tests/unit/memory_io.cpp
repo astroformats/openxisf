@@ -100,6 +100,17 @@ TEST(memory_source, supports_concurrent_reads)
     EXPECT_TRUE(memory_source(std::vector<std::byte>{}).supports_concurrent_reads());
 }
 
+TEST(memory_source, gives_the_bytes_it_borrows_or_owns_in_place)
+{
+    const std::vector<std::byte> data = bytes("abc");
+    const memory_source borrowing{std::span<const std::byte>(data)};
+    EXPECT_EQ(borrowing.bytes().data(), data.data());
+    EXPECT_EQ(borrowing.bytes().size(), 3U);
+
+    const memory_source owning(bytes("xyz"));
+    EXPECT_EQ(text(owning.bytes()), "xyz");
+}
+
 TEST(memory_sink, appends_and_rewrites)
 {
     memory_sink sink;

@@ -94,21 +94,32 @@ unit_header read_monolithic_header(const thread_safe_source& source, std::span<c
 
 } // namespace
 
+std::optional<unit_storage> storage_of(std::string_view start) noexcept
+{
+    if (start.starts_with(monolithic_signature)) {
+        return unit_storage::monolithic;
+    }
+    if (starts_with_xml(start)) {
+        return unit_storage::distributed;
+    }
+    return std::nullopt;
+}
+
 unit_header read_unit_header(const thread_safe_source& source, const limits& limits, diagnostic_log& log)
 {
     std::array<char, monolithic_header_offset> preamble{};
     const std::size_t available = static_cast<std::size_t>(std::min<std::uint64_t>(source.size(), preamble.size()));
     source.read(0, std::as_writable_bytes(std::span(preamble).first(available)));
-    const std::string_view start(preamble.data(), available);
+    const std::optional<unit_storage> storage = storage_of(std::string_view(preamble.data(), available));
 
-    if (start.starts_with(monolithic_signature)) {
+    if (storage == unit_storage::monolithic) {
         if (available < preamble.size()) {
             throw invalid_data_error(errc::invalid_header_length, "the file ends before its header length",
                                      {.offset = header_length_offset});
         }
         return read_monolithic_header(source, std::as_bytes(std::span(preamble)), limits, log);
     }
-    if (!starts_with_xml(start)) {
+    if (!storage) {
         throw invalid_data_error(errc::not_an_xisf_unit,
                                  "the source is not an XISF unit: it starts neither with the signature XISF0100 nor "
                                  "with XML");

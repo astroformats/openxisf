@@ -272,7 +272,7 @@ TEST(block_attributes, refuses_a_malformed_compression)
              "zlib+sh:100",
              "zlib+sh:100:4:1",
              "zstd+sh:100:x",
-             // Byte shuffling needs items of one byte at least (spec §10.6.2).
+             // Byte shuffling needs items of one byte at least (spec §10.6.3).
              "zstd+sh:100:0",
          }) {
         EXPECT_TRUE(throws<invalid_data_error>(errc::invalid_compression, [text] { (void)parse_compression(text); }))

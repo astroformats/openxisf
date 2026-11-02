@@ -210,4 +210,30 @@ TEST(blocks_file, limits_the_number_of_nodes)
     EXPECT_NO_THROW((void)read(blocks_file(nodes), {1}, {.max_index_nodes = 0}));
 }
 
+TEST(blocks_file, limits_the_number_of_elements_of_all_nodes)
+{
+    // Five elements, in a node of two and a node of three.
+    const std::vector<index_node> nodes{{.elements = {{.id = 1}, {.id = 2}}, .next = 200},
+                                        {.position = 200, .elements = {{.id = 3}, {.id = 4}, {.id = 5}}}};
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::too_many_index_elements,
+                                              [&] { (void)read(blocks_file(nodes), {1}, {.max_index_elements = 4}); }));
+    EXPECT_EQ(read(blocks_file(nodes), {1, 5}, {.max_index_elements = 5}).elements.size(), 2U);
+    EXPECT_EQ(read(blocks_file(nodes), {1, 5}, {.max_index_elements = 0}).elements.size(), 2U);
+}
+
+TEST(blocks_file, refuses_a_node_of_too_many_elements_before_it_reads_them)
+{
+    // A file of 160 GiB whose node declares 2^32 - 1 elements, which would take minutes to read. The default limit
+    // refuses the node once its header is read.
+    constexpr std::uint64_t size = openxisf::detail::blocks_file_header_size +
+                                   openxisf::detail::index_node_header_size +
+                                   (std::uint64_t{UINT32_MAX} * openxisf::detail::index_element_size);
+    const auto reads = std::make_shared<std::vector<std::uint64_t>>();
+    const thread_safe_source source(
+        openxisf::test::virtual_source(size, blocks_file_parts({{.length = UINT32_MAX}}), reads));
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::too_many_index_elements,
+                                              [&source] { (void)read_block_index(source, {1}, {}); }));
+    EXPECT_EQ(*reads, (std::vector<std::uint64_t>{0, openxisf::detail::blocks_file_header_size}));
+}
+
 } // namespace

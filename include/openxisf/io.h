@@ -15,8 +15,8 @@
 #include <vector>
 
 /// @file
-/// Sources and sinks: where units are read from and written to, the progress of reading and writing, and the resolvers
-/// that open the external files of distributed units.
+/// Sources, sinks and devices: where units are read from, written to and edited in place, the progress of reading and
+/// writing, and the resolvers that open the external files of distributed units.
 
 namespace openxisf {
 
@@ -36,7 +36,9 @@ using progress_function = std::function<bool(std::uint64_t done, std::uint64_t t
 ///
 /// Reads are positional and exact, so an implementation needs no cursor. The library never asks for bytes beyond
 /// size(), and calls read() from one thread at a time unless supports_concurrent_reads() is true. The content must not
-/// change while a unit is read from the source. Sources are not copyable; the library holds them by pointer.
+/// change while a unit is read from the source, but for what an editor writes in place: the pixel data of uncompressed
+/// attached blocks and their digests, which a reader then reads as they are when it reads them (editor). Sources are
+/// not copyable; the library holds them by pointer.
 class OPENXISF_API input_source
 {
 public:
@@ -57,6 +59,13 @@ public:
 
     /// Names the source in error messages, for example with a path. Empty by default.
     [[nodiscard]] virtual std::string description() const;
+
+    /// The content of the source when it lies in memory, such as a buffer or a file mapped into memory, which must then
+    /// stay valid as long as the source exists. The library may read there instead of calling read(), as reads of
+    /// regions do, from any number of threads at once, whatever supports_concurrent_reads() says. Empty by default,
+    /// for a source read through read() alone; otherwise it has size() bytes, or a unit read from the source throws
+    /// usage_error. An editor reads its device through read() alone.
+    [[nodiscard]] virtual std::span<const std::byte> bytes() const;
 };
 
 /// Output that units are written to: a file, a buffer, or anything an application implements.
@@ -91,6 +100,30 @@ public:
     virtual void finish();
 };
 
+/// Storage that is read and written in place, by position: a source whose bytes can also be overwritten, which an
+/// editor edits a unit through, a file, a buffer, or anything an application implements.
+///
+/// Its size never changes: the library checks every range before the device sees it, and never asks for bytes beyond
+/// size(), to read or to write. It calls the device from one thread at a time, reads included, unless
+/// supports_concurrent_writes() is true, and then for ranges that do not overlap. Devices are not copyable.
+class OPENXISF_API random_access_device : public input_source
+{
+public:
+    random_access_device() = default;
+    ~random_access_device() override;
+
+    /// Overwrites the bytes that start at offset with data, or throws io_error.
+    virtual void write(std::uint64_t offset, std::span<const std::byte> data) = 0;
+
+    /// Makes the bytes written so far durable, as a file is flushed to its storage device, or throws io_error. Does
+    /// nothing by default.
+    virtual void flush();
+
+    /// True when write() may run on several threads at once, and while read() runs, for ranges that do not overlap; the
+    /// reads then follow supports_concurrent_reads(). False by default.
+    [[nodiscard]] virtual bool supports_concurrent_writes() const;
+};
+
 /// A regular file, read with positional I/O, so that any number of threads can read it at once.
 ///
 /// The file stays open until the source is destroyed. Other programs may still read, write, rename or delete it, but
@@ -98,9 +131,11 @@ public:
 class OPENXISF_API file_source final : public input_source
 {
 public:
-    /// Opens the file at path, which is UTF-8 on every platform. What the system says is not a regular file is refused
-    /// before it is opened, since opening a device can act on it: on Windows, a device name such as NUL in any
-    /// directory.
+    /// Opens the file at path, which is UTF-8 on every platform, as the system opens it: the `.` and `..` steps and the
+    /// links of a path that the application gives are the system's to resolve. What is not a regular file is refused
+    /// before it is opened, since opening a device can act on it: on Windows a path of the device namespace that names
+    /// no file, such as `\\.\COM1` or `\\.\pipe\name`, and a device name such as NUL in any directory, by their text,
+    /// and on POSIX systems what stat() says is not one.
     /// @throws usage_error when path is empty or not valid UTF-8.
     /// @throws io_error when the file cannot be opened (errc::open_failed) or is not a regular file, such as a
     ///         directory, the root of a drive or a share among them, or a device (errc::not_a_regular_file).
@@ -136,23 +171,26 @@ struct file_sink_options
 ///
 /// The new file is created like any new file: it has the permissions that the system gives one, not those of the file
 /// it replaces. A target that exists must be a regular file or a link: a directory, a FIFO, a socket or a device is
-/// refused before anything is created. A target that is a symbolic link, or a junction on Windows, is itself replaced
-/// by the new file; what it points to is left as it is. On Windows, a target that another program has open is replaced
-/// only when that program let others delete it (`FILE_SHARE_DELETE`), as file_source does, and a target with the
-/// read-only attribute is not replaced; otherwise finish() fails. That needs a file system that renames with POSIX
-/// semantics, as NTFS does from Windows 10 1607 on: on others, such as FAT32, exFAT and some network shares, finish()
-/// fails while any program has the target open, a reader of the unit being replaced included. POSIX systems replace a
-/// target that cannot be written, as the directory allows.
+/// refused before anything is created, and again by finish(), since another program can change the target meanwhile.
+/// A target that is a symbolic link, or a junction on Windows, is itself replaced by the new file; what it points to is
+/// left as it is. On Windows a directory that is a reparse point of another kind, such as the placeholder of a cloud
+/// file system, is a directory, and a target that another program has open is replaced only when that program let
+/// others delete it (`FILE_SHARE_DELETE`), as file_source does, and a target with the read-only attribute is not
+/// replaced; otherwise finish() fails. That needs a file system that renames with POSIX semantics, as NTFS does from
+/// Windows 10 1607 on: on others, such as FAT32, exFAT and some network shares, finish() fails while any program has
+/// the target open, a reader of the unit being replaced included. POSIX systems replace a target that cannot be
+/// written, as the directory allows.
 class OPENXISF_API file_sink final : public output_sink
 {
 public:
     /// Creates the temporary file for a target at path, which is UTF-8 on every platform. A relative path is taken
     /// from the current directory now: finish() replaces that target, whatever the current directory is by then.
     /// @throws usage_error when path is empty or not valid UTF-8.
-    /// @throws io_error when the target is a directory, a FIFO, a socket or a device, such as /dev/null, or NUL on
-    ///         Windows in any directory (errc::not_a_regular_file); when the temporary file cannot be created, or the
-    ///         current directory of a relative path cannot be found (errc::open_failed); or when the system provides no
-    ///         random data for its name (errc::entropy_unavailable).
+    /// @throws io_error when the target is a directory, a FIFO, a socket or a device, such as /dev/null, or on Windows
+    ///         NUL in any directory or a path of the device namespace that names no file (errc::not_a_regular_file);
+    ///         when the temporary file cannot be created, or the current directory of a relative path cannot be found
+    ///         (errc::open_failed); or when the system provides no random data for its name
+    ///         (errc::entropy_unavailable).
     explicit file_sink(std::string_view path, file_sink_options options = {});
     ~file_sink() override;
 
@@ -163,11 +201,48 @@ public:
     void rewrite(std::uint64_t offset, std::span<const std::byte> data) override;
     /// Replaces the target with the temporary file. When it throws, the temporary file is gone, and the target keeps
     /// its old content unless the failure was the flush to disk that follows the replacement.
+    /// @throws io_error when the target has become a directory, a FIFO, a socket or a device since the sink was made
+    ///         (errc::not_a_regular_file), or cannot be replaced (errc::write_failed).
     void finish() override;
 
 private:
     struct state;
     std::unique_ptr<state> state_;
+};
+
+/// An existing regular file, read and written in place with positional I/O, so that any number of threads can read and
+/// write it at once, at ranges that do not overlap.
+///
+/// The file stays open until the device is destroyed, and keeps its size. Other programs may still read, write, rename
+/// or delete it, as for file_source.
+class OPENXISF_API file_device final : public random_access_device
+{
+public:
+    /// Opens the file at path, which is UTF-8 on every platform, for reading and writing. What the system says is not
+    /// a regular file is refused before it is opened, as file_source refuses it.
+    /// @throws usage_error when path is empty or not valid UTF-8.
+    /// @throws io_error when the file cannot be opened for reading and writing, such as a file that does not exist or
+    ///         that the process may not write (errc::open_failed), or is not a regular file, such as a directory or a
+    ///         device (errc::not_a_regular_file).
+    explicit file_device(std::string_view path);
+    ~file_device() override;
+
+    [[nodiscard]] std::uint64_t size() const override;
+    void read(std::uint64_t offset, std::span<std::byte> destination) const override;
+    /// Throws usage_error when the bytes go past the end of the file, which the file then never sees.
+    void write(std::uint64_t offset, std::span<const std::byte> data) override;
+    /// Flushes the file to the storage device, so that what was written survives a power failure.
+    void flush() override;
+    /// True.
+    [[nodiscard]] bool supports_concurrent_reads() const override;
+    /// True.
+    [[nodiscard]] bool supports_concurrent_writes() const override;
+    /// The path.
+    [[nodiscard]] std::string description() const override;
+
+private:
+    struct state;
+    std::unique_ptr<const state> state_;
 };
 
 /// Bytes in memory, borrowed from the caller or owned by the source. Any number of threads can read it at once.
@@ -183,6 +258,8 @@ public:
     void read(std::uint64_t offset, std::span<std::byte> destination) const override;
     /// True.
     [[nodiscard]] bool supports_concurrent_reads() const override;
+    /// The bytes, borrowed or owned.
+    [[nodiscard]] std::span<const std::byte> bytes() const override;
 
 private:
     std::vector<std::byte> owned_;
@@ -206,6 +283,27 @@ public:
 
 private:
     std::vector<std::byte> data_;
+};
+
+/// Bytes in memory of the caller, read and written in place. Any number of threads can read and write it at once, at
+/// ranges that do not overlap.
+class OPENXISF_API memory_device final : public random_access_device
+{
+public:
+    /// Borrows data, which must outlive the device, and which the device reads and writes.
+    explicit memory_device(std::span<std::byte> data) noexcept;
+
+    [[nodiscard]] std::uint64_t size() const override;
+    void read(std::uint64_t offset, std::span<std::byte> destination) const override;
+    /// Throws usage_error when the bytes go past the end of the buffer, which then stays as it was.
+    void write(std::uint64_t offset, std::span<const std::byte> data) override;
+    /// True.
+    [[nodiscard]] bool supports_concurrent_reads() const override;
+    /// True.
+    [[nodiscard]] bool supports_concurrent_writes() const override;
+
+private:
+    std::span<std::byte> data_;
 };
 
 /// Options of callback_source.
@@ -295,9 +393,11 @@ struct external_reference
 /// an io_error of the source that the resolver returned: while the block index of a data blocks file is read, for the
 /// blocks in the file, and while ancillary data are loaded from the file (the value of a property, an ICC profile, the
 /// pixels of a thumbnail), at the open or in reader::load_ancillary_data(), for the block being loaded. Any other
-/// exception passes through and fails the open. A resolver is called while a unit is opened, on that thread, once for
-/// each file, and again when reader::load_ancillary_data() opens the unit again; the reader keeps the source it returns
-/// as long as it exists.
+/// exception passes through and fails the open, or the read. A resolver is called once for each file that it opens:
+/// while a unit is opened, on that thread, or for a header-only open (read_options::header_only) when the pixels of an
+/// image in the file are first read, on the thread of that read and one file at a time, and by
+/// reader::load_ancillary_data() for the files that are not open; the reader keeps the source it returns as long as it
+/// exists.
 using external_resolver = std::function<std::unique_ptr<input_source>(const external_reference& reference)>;
 
 /// Options of file_resolver().
@@ -317,12 +417,14 @@ struct file_resolver_options
 /// (errc::unsupported_location).
 ///
 /// A missing file is errc::open_failed, and a file that is not a regular file, such as a directory or a device,
-/// errc::not_a_regular_file, as for file_source, which refuses a device before it is opened. A relative path is
-/// resolved as POSIX resolves one on every system: a `.` or `..` step follows a directory (errc::open_failed after a
-/// file, as in `data.xisb/.`), and a path that ends with a separator or such a step names a directory. The checks
-/// protect against what a unit names, not against programs that change the directory tree while a unit is opened. A
-/// relative header_directory is taken from the current directory when the resolver is made, so that a unit opened by a
-/// relative path finds its files when it is read again from another one.
+/// errc::not_a_regular_file, as for file_source, which refuses a device before it is opened. A path, relative or
+/// absolute, is resolved as POSIX resolves one on every system: a `.` or `..` step follows a directory
+/// (errc::open_failed after a file, as in `data.xisb/.`), and a path that ends with a separator or such a step names a
+/// directory. The file read is the one whose path was checked: on Windows through the handle that found it, and on
+/// POSIX systems by opening each directory of its path from the one before, then the file, without following a link,
+/// so that a program that changes the directory tree meanwhile makes the open fail (errc::open_failed) rather than lead
+/// it outside the directory. A relative header_directory is taken from the current directory when the resolver is
+/// made, so that a unit opened by a relative path finds its files when it is read again from another one.
 /// @throws usage_error when header_directory is empty or not valid UTF-8.
 /// @throws io_error (errc::open_failed) when header_directory is relative and the current directory cannot be found.
 [[nodiscard]] OPENXISF_API external_resolver file_resolver(std::string_view header_directory,

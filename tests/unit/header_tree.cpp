@@ -19,6 +19,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -60,13 +61,13 @@ TEST(header_tree, pixel_data_are_borrowed_until_they_are_made_little_endian)
     const std::vector<std::string> uuids(2);
     header_tree tree = openxisf::detail::build_header_tree(unit, {}, uuids);
     ASSERT_EQ(tree.blocks.size(), 2U);
-    EXPECT_EQ(tree.blocks[0].data().data(), unit.pixels[0].data());
-    EXPECT_EQ(tree.blocks[1].data().data(), unit.pixels[1].data());
+    EXPECT_EQ(tree.blocks[0].data().data(), std::as_bytes(std::span(wide)).data());
+    EXPECT_EQ(tree.blocks[1].data().data(), std::as_bytes(std::span(narrow)).data());
     EXPECT_EQ(tree.blocks[0].native_order, std::endian::native == std::endian::big);
     EXPECT_FALSE(tree.blocks[1].native_order);
 
     // A marked block gets a copy with the bytes of each sample in the other order, which it then holds.
-    const std::span<const std::byte> native = unit.pixels[0];
+    const std::span<const std::byte> native = std::as_bytes(std::span(wide));
     block_source& block = tree.blocks[0];
     block.native_order = true;
     openxisf::detail::to_little_endian(block);
@@ -76,7 +77,31 @@ TEST(header_tree, pixel_data_are_borrowed_until_they_are_made_little_endian)
     EXPECT_EQ(block.data().data(), block.owned.data());
     // Another block is left as it is.
     openxisf::detail::to_little_endian(tree.blocks[1]);
-    EXPECT_EQ(tree.blocks[1].data().data(), unit.pixels[1].data());
+    EXPECT_EQ(tree.blocks[1].data().data(), std::as_bytes(std::span(narrow)).data());
+}
+
+TEST(header_tree, a_reserved_image_has_a_block_of_zeros_without_data)
+{
+    // An image added with writer::add_reserved_image() has no pixel data: its block holds the size of its zeros, which
+    // nothing swaps.
+    openxisf::image_info image;
+    image.geometry = {.dimensions = {3, 2}, .channels = 2};
+    image.sample_format = openxisf::sample_format::float64;
+    openxisf::detail::unit_contents unit;
+    unit.images = {image};
+    unit.pixels = {std::nullopt};
+    const std::vector<std::string> uuids(1);
+    header_tree tree = openxisf::detail::build_header_tree(unit, {}, uuids);
+    ASSERT_EQ(tree.blocks.size(), 1U);
+    block_source& block = tree.blocks[0];
+    EXPECT_EQ(block.reserved_size, 96U);
+    EXPECT_EQ(block.size(), 96U);
+    EXPECT_TRUE(block.data().empty());
+    EXPECT_FALSE(block.inline_data);
+    EXPECT_FALSE(block.native_order);
+    openxisf::detail::to_little_endian(block);
+    EXPECT_EQ(block.reserved_size, 96U);
+    EXPECT_TRUE(block.data().empty());
 }
 
 } // namespace

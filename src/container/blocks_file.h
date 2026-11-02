@@ -67,8 +67,10 @@ struct block_index
 /// more bytes than the file has, so that the work is bounded by its size.
 ///
 /// Throws invalid_data_error with errc::invalid_blocks_file when source does not start with the signature, or when a
-/// node breaks those rules; limit_error with errc::too_many_index_nodes for more nodes than limits.max_index_nodes;
-/// and what the source throws. The messages do not name the file, which the caller knows by its location.
+/// node breaks those rules; limit_error with errc::too_many_index_nodes for more nodes than limits.max_index_nodes, and
+/// with errc::too_many_index_elements for more elements in all than limits.max_index_elements, counted from the length
+/// of each node before its elements are read; and what the source throws. The messages do not name the file, which
+/// the caller knows by its location.
 [[nodiscard]] block_index read_block_index(const thread_safe_source& source,
                                            const std::unordered_set<std::uint64_t>& wanted, const limits& limits);
 

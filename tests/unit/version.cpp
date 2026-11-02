@@ -20,3 +20,10 @@ TEST(version, string_is_made_of_the_numeric_macros)
                                  '.' + std::to_string(OPENXISF_VERSION_PATCH);
     EXPECT_EQ(openxisf::version(), expected);
 }
+
+TEST(version, library_reports_the_numbers_of_the_header)
+{
+    const openxisf::version_info header{
+        .major = OPENXISF_VERSION_MAJOR, .minor = OPENXISF_VERSION_MINOR, .patch = OPENXISF_VERSION_PATCH};
+    EXPECT_EQ(openxisf::version_numbers(), header);
+}

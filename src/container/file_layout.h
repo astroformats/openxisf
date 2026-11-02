@@ -10,6 +10,7 @@
 #include "io/thread_safe_source.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -27,6 +28,11 @@ inline constexpr std::uint64_t monolithic_header_offset = 16;
 /// The least header length of a monolithic file: 65 bytes, which the code of spec §9.2 gives an empty header, from
 /// "<?xml" to "</xisf>". A well-formed header can be shorter, with a self-closing root element.
 inline constexpr std::uint32_t min_header_length = 65;
+
+/// How the unit that starts with the bytes start is stored: monolithic after the signature of a monolithic file, and
+/// distributed after XML, which an optional UTF-8 byte order mark may precede; empty for neither, which
+/// read_unit_header() refuses.
+[[nodiscard]] std::optional<unit_storage> storage_of(std::string_view start) noexcept;
 
 /// The header of a unit as found in its source, not yet parsed.
 struct unit_header

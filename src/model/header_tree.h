@@ -47,17 +47,26 @@ struct block_source
     std::optional<std::span<const std::byte>> borrowed{};
     /// The data, when the builder made them.
     std::vector<std::byte> owned{};
-    /// The size of the numbers that the block holds, the item size of byte shuffling (spec §10.6.2); 1 for bytes.
+    /// The size of the numbers that the block holds, the item size of byte shuffling (spec §10.6.3); 1 for bytes.
     std::size_t item_size = 1;
     /// True for a block written in the header, as Base64, and false for an attached one.
     bool inline_data = false;
     /// True when borrowed holds numbers of item_size bytes in the byte order of a big-endian host, which
     /// to_little_endian() swaps in a copy before the block is written.
     bool native_order = false;
+    /// For the pixel data of a reserved image, the zeros that the block holds, which are written in pieces, never
+    /// compressed or swapped; its data are empty. 0 for every other block.
+    std::uint64_t reserved_size = 0;
 
     [[nodiscard]] std::span<const std::byte> data() const noexcept
     {
         return borrowed ? *borrowed : std::span<const std::byte>(owned);
+    }
+
+    /// The bytes of the block before compression: those of its data, or its zeros.
+    [[nodiscard]] std::uint64_t size() const noexcept
+    {
+        return reserved_size != 0 ? reserved_size : data().size();
     }
 };
 

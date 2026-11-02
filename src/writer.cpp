@@ -25,8 +25,10 @@ namespace openxisf {
 
 namespace {
 
-// Spec §9.6: monolithic files carry the .xisf suffix, header files .xish and data blocks files .xisb. File systems that
-// ignore case take them in any case, so the writer does too.
+// Spec §9.6: monolithic files carry the .xisf suffix, header files .xish and data blocks files .xisb. The writer checks
+// the suffixes of a distributed unit, whose header file gives the name of its data blocks file and locates it by that
+// name; the name of a monolithic file is the application's, which nothing in the unit depends on. File systems that
+// ignore case take the suffixes in any case, so the writer does too.
 bool has_suffix(std::string_view path, std::string_view suffix) noexcept
 {
     if (path.size() < suffix.size()) {
@@ -131,6 +133,20 @@ void write_valid_distributed_unit(const detail::unit_contents& unit, const write
 struct writer::state : detail::unit_contents
 {
     write_options options;
+
+    // Adds an image after the others, with its pixel data, or none for a reserved image. Returns its index.
+    std::size_t add(image_info info, std::optional<std::span<const std::byte>> data)
+    {
+        // The two vectors keep the same size, which the save relies on, even when the second cannot grow.
+        pixels.push_back(data);
+        try {
+            images.push_back(std::move(info));
+        } catch (...) {
+            pixels.pop_back();
+            throw;
+        }
+        return images.size() - 1;
+    }
 };
 
 writer::writer(write_options options) : state_(std::make_unique<state>())
@@ -195,15 +211,14 @@ std::size_t writer::add_image(image_info info, std::span<const std::byte> pixels
         throw usage_error(errc::invalid_argument, "the pixel data have " + std::to_string(pixels.size()) +
                                                       " bytes, and the image " + std::to_string(info.data_size()));
     }
-    // The two vectors keep the same size, which the save relies on, even when the second cannot grow.
-    state_->pixels.push_back(pixels);
-    try {
-        state_->images.push_back(std::move(info));
-    } catch (...) {
-        state_->pixels.pop_back();
-        throw;
-    }
-    return state_->images.size() - 1;
+    return state_->add(std::move(info), pixels);
+}
+
+std::size_t writer::add_reserved_image(image_info info)
+{
+    // The size of the zeros, which the save writes.
+    (void)info.data_size();
+    return state_->add(std::move(info), std::nullopt);
 }
 
 std::span<const image_info> writer::images() const noexcept
@@ -222,9 +237,7 @@ void writer::check_sample_format(const image_info& info, sample_format format)
 
 void writer::save(std::string_view path) const
 {
-    if (!has_suffix(path, ".xisf")) {
-        throw usage_error(errc::invalid_argument, "the path of a monolithic file must end with .xisf (spec §9.6)");
-    }
+    detail::check_path_argument(path, "the path");
     // Before the file exists, so that a unit that cannot be written leaves no trace.
     detail::validate_unit(*state_, state_->options);
     file_sink sink(path, {.flush_to_disk = state_->options.flush_to_disk});

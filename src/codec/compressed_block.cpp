@@ -110,8 +110,10 @@ std::uint64_t max_expansion(compression_codec codec) noexcept
     return 32768;
 }
 
-// A subblock that did not get smaller is stored as it is, which its two equal sizes tell. The specification does not
-// say so, but PixInsight writes such subblocks, and reads every subblock that is not smaller than its data so.
+// A subblock that did not get smaller is stored as it is, which its two equal sizes tell (spec §10.6.1, Revision 2).
+// The specification lets a decoder try to decompress such a subblock first, since encoders of earlier revisions could
+// compress every subblock; this decoder reads it as stored, as PixInsight does, so codec output of exactly the size of
+// its input is read as data.
 bool stored_as_is(const subblock& part) noexcept
 {
     return part.compressed_size == part.uncompressed_size;
@@ -260,6 +262,28 @@ void check_subblocks(const block_compression& compression, std::uint64_t stored_
     }
 }
 
+void check_zstd_expansion(const block_compression& compression, std::uint64_t stored_size, std::uint64_t max_expansion)
+{
+    if (compression.codec != compression_codec::zstd || max_expansion == 0) {
+        return;
+    }
+    const subblock whole{.compressed_size = stored_size, .uncompressed_size = compression.uncompressed_size};
+    const std::span<const subblock> subblocks =
+        compression.subblocks.empty() ? std::span<const subblock>(&whole, 1) : std::span(compression.subblocks);
+    for (std::size_t i = 0; i < subblocks.size(); ++i) {
+        const subblock& part = subblocks[i];
+        // More than max_expansion × compressed_size, which cannot overflow then. A subblock stored as it is, of equal
+        // sizes, is within every limit.
+        if (part.uncompressed_size != 0 && (part.uncompressed_size - 1) / max_expansion >= part.compressed_size) {
+            throw limit_error(errc::zstd_expansion_too_large,
+                              name_of(compression, i) + " declares " + std::to_string(part.uncompressed_size) +
+                                  " bytes, more than the limit of " + std::to_string(max_expansion) +
+                                  " times its stored size for Zstandard, " +
+                                  std::to_string(max_expansion * part.compressed_size) + " bytes");
+        }
+    }
+}
+
 std::vector<subblock> subblocks_of(const block_compression& compression, std::uint64_t stored_size)
 {
     check_subblocks(compression, stored_size);
@@ -292,33 +316,43 @@ template <typename Function> void for_subblock(std::size_t index, std::size_t co
     }
 }
 
+// Subblocks of a block, from first on, of total subblocks in the block: their messages name them by their place in it.
+struct numbered_subblocks
+{
+    std::span<const subblock> subblocks{};
+    std::size_t first = 0;
+    std::size_t total = 0;
+};
+
 // A Zstandard frame declares the size of its content, which must be that of its subblock: a block whose frames declare
 // other sizes is refused before the memory of its data is allocated.
-void check_frames(std::span<const std::byte> stored, compression_codec codec, const std::vector<subblock>& subblocks)
+void check_frames(std::span<const std::byte> stored, compression_codec codec, const numbered_subblocks& numbered)
 {
     if (codec != compression_codec::zstd) {
         return;
     }
+    const std::span<const subblock> subblocks = numbered.subblocks;
     std::size_t start = 0;
     for (std::size_t i = 0; i < subblocks.size(); ++i) {
         const auto size = static_cast<std::size_t>(subblocks[i].compressed_size);
         if (!stored_as_is(subblocks[i])) {
-            for_subblock(i, subblocks.size(),
+            for_subblock(numbered.first + i, numbered.total,
                          [&] { zstd_check_frame(stored.subspan(start, size), subblocks[i].uncompressed_size); });
         }
         start += size;
     }
 }
 
-// Decompresses the subblocks of a block, which subblocks_of() checked, each into its place in data, which has the
-// uncompressed size of the block. The subblocks are independent, so each batch of as many as the threads that can run
-// at once is decompressed in parallel; progress follows on the calling thread, subblock by subblock, after each batch.
-// A Zstandard frame that does not declare its size is a batch of its own: it needs a window buffer of up to
+// Decompresses subblocks of a block, which subblocks_of() checked, each into its place in data, which has their
+// uncompressed size. The subblocks are independent, so each batch of as many as the threads that can run at once is
+// decompressed in parallel; progress follows on the calling thread, subblock by subblock, after each batch. A
+// Zstandard frame that does not declare its size is a batch of its own: it needs a window buffer of up to
 // limits.max_zstd_window, which then bounds the memory of the whole read, not that of each thread.
 void decompress_subblocks(std::span<const std::byte> stored, compression_codec codec,
-                          const std::vector<subblock>& subblocks, const limits& limits, std::span<std::byte> data,
+                          const numbered_subblocks& numbered, const limits& limits, std::span<std::byte> data,
                           const subblock_progress& progress)
 {
+    const std::span<const subblock> subblocks = numbered.subblocks;
     // Where each subblock starts in stored and in data, and where the last one ends.
     std::vector<std::size_t> in(subblocks.size() + 1);
     std::vector<std::size_t> out(subblocks.size() + 1);
@@ -329,7 +363,7 @@ void decompress_subblocks(std::span<const std::byte> stored, compression_codec c
     const auto decompress = [&](std::size_t i) {
         const std::span<const std::byte> input = stored.subspan(in[i], in[i + 1] - in[i]);
         const std::span<std::byte> output = data.subspan(out[i], out[i + 1] - out[i]);
-        for_subblock(i, subblocks.size(), [&] {
+        for_subblock(numbered.first + i, numbered.total, [&] {
             if (stored_as_is(subblocks[i])) {
                 std::ranges::copy(input, output.begin());
             } else {
@@ -364,14 +398,15 @@ void decompress_into(std::span<const std::byte> stored, const block_compression&
                      const std::vector<subblock>& subblocks, const limits& limits, std::span<std::byte> destination,
                      const subblock_progress& progress)
 {
+    const numbered_subblocks all{.subblocks = subblocks, .first = 0, .total = subblocks.size()};
     if (compression.item_size <= 1) {
-        decompress_subblocks(stored, compression.codec, subblocks, limits, destination, progress);
+        decompress_subblocks(stored, compression.codec, all, limits, destination, progress);
         return;
     }
     check_decompressed_allocation(compression, limits);
     // The subblocks fill it or throw.
     scratch_buffer shuffled(destination.size());
-    decompress_subblocks(stored, compression.codec, subblocks, limits, shuffled.bytes(), progress);
+    decompress_subblocks(stored, compression.codec, all, limits, shuffled.bytes(), progress);
     unshuffle_bytes(shuffled.bytes(), destination, static_cast<std::size_t>(compression.item_size));
 }
 
@@ -381,7 +416,7 @@ std::vector<std::byte> decompress_block(std::span<const std::byte> stored, const
                                         const limits& limits, const subblock_progress& progress)
 {
     const std::vector<subblock> subblocks = subblocks_of(compression, stored.size());
-    check_frames(stored, compression.codec, subblocks);
+    check_frames(stored, compression.codec, {.subblocks = subblocks, .first = 0, .total = subblocks.size()});
     check_decompressed_allocation(compression, limits);
     std::vector<std::byte> data(checked_cast<std::size_t>(compression.uncompressed_size));
     decompress_into(stored, compression, subblocks, limits, data, progress);
@@ -397,8 +432,61 @@ void decompress_block_into(std::span<const std::byte> stored, const block_compre
                                                       " bytes, and the data block decompresses to " +
                                                       std::to_string(compression.uncompressed_size));
     }
-    check_frames(stored, compression.codec, subblocks);
+    check_frames(stored, compression.codec, {.subblocks = subblocks, .first = 0, .total = subblocks.size()});
     decompress_into(stored, compression, subblocks, limits, destination, progress);
+}
+
+std::vector<subblock_span> covering_subblocks(const block_compression& compression, std::uint64_t stored_size,
+                                              const needed_bytes& needed, std::size_t most_count,
+                                              std::uint64_t most_size)
+{
+    check_subblocks(compression, stored_size);
+    const subblock whole{.compressed_size = stored_size, .uncompressed_size = compression.uncompressed_size};
+    const std::span<const subblock> subblocks =
+        compression.subblocks.empty() ? std::span<const subblock>(&whole, 1) : std::span(compression.subblocks);
+    std::vector<subblock_span> spans;
+    // Where the subblock starts, stored and uncompressed; the sums were checked.
+    std::uint64_t stored = 0;
+    std::uint64_t offset = 0;
+    // Whether the last span ends with the subblock before.
+    bool follows = false;
+    for (std::size_t i = 0; i < subblocks.size(); ++i) {
+        const subblock& part = subblocks[i];
+        const bool covers = needed(offset, offset + part.uncompressed_size);
+        if (covers && follows && spans.back().count < most_count &&
+            part.uncompressed_size <= most_size - std::min(most_size, spans.back().size)) {
+            subblock_span& last = spans.back();
+            ++last.count;
+            last.stored_size += part.compressed_size;
+            last.size += part.uncompressed_size;
+        } else if (covers) {
+            spans.push_back({.first = i,
+                             .count = 1,
+                             .stored_offset = stored,
+                             .stored_size = part.compressed_size,
+                             .offset = offset,
+                             .size = part.uncompressed_size});
+        }
+        follows = covers;
+        stored += part.compressed_size;
+        offset += part.uncompressed_size;
+    }
+    return spans;
+}
+
+void decompress_subblocks_into(std::span<const std::byte> stored, const block_compression& compression,
+                               const subblock_span& span, const limits& limits, std::span<std::byte> data,
+                               const subblock_progress& progress)
+{
+    // A block without subblocks is the only subblock of its span.
+    const subblock whole{.compressed_size = span.stored_size, .uncompressed_size = span.size};
+    const numbered_subblocks numbered{
+        .subblocks = compression.subblocks.empty() ? std::span<const subblock>(&whole, 1)
+                                                   : std::span(compression.subblocks).subspan(span.first, span.count),
+        .first = span.first,
+        .total = std::max<std::size_t>(compression.subblocks.size(), 1)};
+    check_frames(stored, compression.codec, numbered);
+    decompress_subblocks(stored, compression.codec, numbered, limits, data, progress);
 }
 
 block_compression compress_subblocks(std::span<const std::byte> data, const compression_options& options,

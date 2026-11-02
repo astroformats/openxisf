@@ -5,6 +5,8 @@
 #include <openxisf/image.h>
 #include <openxisf/types.h>
 
+#include "model/pixel_layout.h"
+
 #include <limits>
 
 namespace openxisf {
@@ -33,6 +35,11 @@ std::uint64_t geometry::pixel_count() const
 std::uint64_t geometry::sample_count() const
 {
     return multiply(pixel_count(), channels);
+}
+
+std::uint64_t pixel_region::sample_count(const geometry& image) const
+{
+    return detail::resolve_region(*this, image).samples;
 }
 
 std::uint64_t image_info::data_size() const

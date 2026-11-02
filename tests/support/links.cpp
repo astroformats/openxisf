@@ -99,6 +99,38 @@ void create_junction(const std::filesystem::path& target, const std::filesystem:
         throw std::runtime_error("cannot create the junction");
     }
 }
+
+void create_foreign_reparse_point(const std::filesystem::path& path)
+{
+    std::filesystem::create_directory(path);
+    // A tag without the Microsoft bit, which takes the GUID of its owner, and 8 bytes of data of that owner. The header
+    // is what precedes the data (REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, a LONG).
+    constexpr DWORD tag = 0x0000'0105;
+    constexpr GUID owner{.Data1 = 0x6f70656e,
+                         .Data2 = 0x7869,
+                         .Data3 = 0x7366,
+                         .Data4 = {0x72, 0x65, 0x70, 0x61, 0x72, 0x73, 0x65, 0x31}};
+    constexpr std::size_t header_size = offsetof(REPARSE_GUID_DATA_BUFFER, GenericReparseBuffer);
+    std::vector<std::byte> buffer(header_size + 8);
+    REPARSE_GUID_DATA_BUFFER header{};
+    header.ReparseTag = tag;
+    header.ReparseDataLength = 8;
+    header.ReparseGuid = owner;
+    std::memcpy(buffer.data(), &header, header_size);
+
+    HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("cannot open the directory of the reparse point");
+    }
+    DWORD returned = 0;
+    const BOOL created = DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, buffer.data(),
+                                         static_cast<DWORD>(buffer.size()), nullptr, 0, &returned, nullptr);
+    (void)CloseHandle(handle);
+    if (created == FALSE) {
+        throw std::runtime_error("cannot create the reparse point");
+    }
+}
 #endif
 
 } // namespace openxisf::test

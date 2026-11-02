@@ -10,8 +10,11 @@
 #include <openxisf/limits.h>
 #include <openxisf/property.h>
 #include <openxisf/types.h>
+#include <openxisf/writer.h>
 
+#include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
@@ -46,13 +49,19 @@ struct read_options
     /// location that the resolver does not allow, limit_error for data beyond a limit, io_error for an external file
     /// that cannot be opened or read, and invalid_data_error for anything else.
     bool strict = false;
-    /// Read the header alone: leave the ancillary data in data blocks unloaded, so that nothing but the header is read,
-    /// and for a distributed unit the block indexes of its data blocks files. ICC profiles and the pixels of thumbnails
-    /// stay empty, and the properties and tables with values in data blocks are left out, until
-    /// reader::load_ancillary_data() loads them; the problems of those data are found then. Their identifiers are
-    /// known: another property or table of the object with one of them is refused, as a full open refuses it, and a
-    /// mandatory metadata property left out is not reported missing. The model is not complete until then, so the
-    /// writer would lose those data, or refuse a thumbnail without pixels (writer).
+    /// Read the header alone: leave the ancillary data in data blocks unloaded, so that nothing but the header is read.
+    /// ICC profiles and the pixels of thumbnails stay empty, and the properties and tables with values in data blocks
+    /// are left out, until reader::load_ancillary_data() loads them; the problems of those data are found then. Their
+    /// identifiers are known: another property or table of the object with one of them is refused, as a full open
+    /// refuses it, and a mandatory metadata property left out is not reported missing. The model is not complete until
+    /// then, so the writer would lose those data, or refuse a thumbnail without pixels (writer).
+    ///
+    /// The external files of a distributed unit stay closed too: the resolver opens a file, and its block index is
+    /// read, when the pixels of an image in it are first read, or by reader::load_ancillary_data(), so that a resolver
+    /// that is costly to call, such as one of a network store, is called only for the files that are used. The
+    /// problems of a file are then found by the read, not by the open, whose diagnostics do not list them and which
+    /// does not fail for them when strict: a read of an image in the file throws the error of its block, one that does
+    /// not hold the pixel data of the image among them, and load_ancillary_data() lists them.
     bool header_only = false;
     /// Opens the files of the external data blocks of a distributed unit (spec §10.2). When it is empty, a unit opened
     /// from a path gets file_resolver() for the directory of that path, with its default options, and a unit opened
@@ -68,8 +77,77 @@ struct pixel_read_options
     /// The storage model of the samples read: that of the image when empty (spec §8.5.3).
     std::optional<openxisf::pixel_storage> storage{};
     /// Called as the data are read and decompressed, and able to cancel the read. Its units of work are the bytes read
-    /// from the source plus, for a compressed image, the bytes decompressed.
+    /// from the source plus, for a compressed image, the bytes decompressed; for a region read as it is stored, without
+    /// a decompression or a verification of the whole block, the bytes of the region.
     progress_function progress{};
+    /// The region of the image to read: the samples of its box and channels alone, in rows (pitch). The whole image
+    /// when empty.
+    ///
+    /// What a region costs depends on how the image is stored. Uncompressed data are read run by run, the stretches of
+    /// the block that the region fills, those close together in one read. A compressed block is decoded subblock by
+    /// subblock, those that hold bytes of the region alone, a few at a time, so that a region of a large image needs a
+    /// few subblocks of memory, whatever its size: a frame meant for region access is written with subblocks of a few
+    /// MiB (write_options::subblock_size, 4 MiB by default), since a block compressed as a single subblock is decoded
+    /// whole. Byte shuffling spreads the bytes of the samples over the block, one stretch for each byte of a sample: a
+    /// region of a shuffled block decodes about as many bytes as without shuffling, and up to two more subblocks for
+    /// each of those stretches, and gathers its samples byte by byte. A block with a checksum is read whole and
+    /// verified first, as for a whole image, unless verify_checksum is false.
+    std::optional<pixel_region> region{};
+    /// The samples from the start of one row of the destination to the start of the next, at least a row, so that the
+    /// samples read land in a larger buffer: a tile in its place in a frame, for example. 0 for rows that follow each
+    /// other. A row holds the samples along the first axis: of one channel in the planar storage model, where the rows
+    /// of each channel follow those of the one before, and of every channel read, pixel by pixel, in the normal model.
+    /// The rows follow the order of the pixels along the other axes. The bytes between the rows are left as they are.
+    std::uint64_t pitch = 0;
+    /// Verify the data of a block that has a checksum before they are used, as spec §10.5 requires. A checksum covers
+    /// the whole block, so a region of such a block is read by reading and verifying all of it first. false is the
+    /// explicit choice of the application to read the data as those of a block without a checksum, which nothing
+    /// verifies then: regions of a unit that it verified once, for example. Inline and embedded blocks are verified
+    /// when the unit is opened, either way.
+    bool verify_checksum = true;
+};
+
+/// Where a data block is stored (spec §10.3).
+enum class block_location : std::uint8_t
+{
+    inline_data, ///< In the header, as the text of the element whose data it holds (`inline:base64`, `inline:hex`).
+    embedded,    ///< In the header, as the text of a Data child element of that element (`embedded`).
+    attachment,  ///< In the monolithic file, after the header (`attachment:position:size`).
+    external,    ///< In a file of its own or in a data blocks file, which the resolver opens (`path()`, `url()`).
+};
+
+/// How the pixel data of an image are stored: the facts of its data block that the header states, and for an external
+/// block the block index of its file (spec §10), which reader::block() returns. They tell what a read costs before it
+/// is made: a region of an uncompressed block is read run by run, and one of a compressed block subblock by subblock,
+/// a few at a time, while a block with a checksum is read whole to be verified first (pixel_read_options). They also
+/// give the options that write the image again in the same form (write_options).
+struct block_info
+{
+    /// Where the block is stored.
+    block_location location = block_location::attachment;
+    /// The byte order of the samples in the block (spec §10.4). Reads return them in native byte order, whatever it is.
+    std::endian byte_order = std::endian::little;
+    /// The codec that compresses the block (spec §10.6); empty when it is not compressed.
+    std::optional<openxisf::codec> codec{};
+    /// Whether the bytes of the samples were shuffled before they were compressed (spec §10.6.3).
+    bool byte_shuffle = false;
+    /// The uncompressed size of the largest subblock of the block, in bytes: the most that a read decodes in one piece,
+    /// as write_options::subblock_size bounds it. That of the whole block when it is compressed as a single subblock,
+    /// and 0 when it is not compressed.
+    std::uint64_t subblock_size = 0;
+    /// The number of subblocks of the block, which are compressed and decompressed separately (spec §10.6): 1 for a
+    /// block compressed as a whole, and 0 when it is not compressed.
+    std::uint64_t subblock_count = 0;
+    /// The algorithm of the checksum of the block (spec §10.5); empty when it has none.
+    std::optional<checksum_algorithm> checksum{};
+    /// The size of the block as stored, in bytes: compressed, when it is compressed, and decoded from its text, for an
+    /// inline or embedded block.
+    std::uint64_t stored_size = 0;
+    /// The size of the data of the block, uncompressed, in bytes: that of the pixel data of the image
+    /// (image_info::data_size()).
+    std::uint64_t uncompressed_size = 0;
+
+    friend bool operator==(const block_info&, const block_info&) = default;
 };
 
 #if defined(_MSC_VER)
@@ -86,14 +164,15 @@ struct pixel_read_options
 /// verifies the checksums of the blocks written in the header; attached blocks are verified when they are read. The
 /// external data blocks of a header file are located when it is opened: read_options::resolver opens each file once,
 /// and the block index of each data blocks file is read (spec §9.4), so that a block that cannot be found is
-/// unavailable, with a diagnostic; the files stay open as long as the reader exists. It describes each image and what
-/// is associated with it, and loads the ancillary data in data blocks, within limits::max_ancillary_data: ICC
-/// profiles, the pixels of thumbnails, and the values of properties and table cells (read_options::header_only defers
-/// them). Pixel data are read on request, with read_pixels(). Problems confined to one object of the unit do not fail
-/// it: the object is unavailable, and a diagnostic says why (spec §7). An external file whose source fails with
-/// io_error is such a problem, while its block index is read, for the blocks in the file, and while ancillary data are
-/// loaded from it, for the block being loaded; an io_error of the source of the unit fails the open. A signed unit is
-/// read like any other; its signature is returned, not verified (signature()).
+/// unavailable, with a diagnostic; the files stay open as long as the reader exists (read_options::header_only leaves
+/// them closed until they are used). It describes each image and what is associated with it, and loads the ancillary
+/// data in data blocks, within limits::max_ancillary_data: ICC profiles, the pixels of thumbnails, and the values of
+/// properties and table cells (read_options::header_only defers them). Pixel data are read on request, with
+/// read_pixels(). Problems confined to one object of the unit do not fail it: the object is unavailable, and a
+/// diagnostic says why (spec §7). An external file whose source fails with io_error is such a problem, while its block
+/// index is read, for the blocks in the file, and while ancillary data are loaded from it, for the block being loaded;
+/// an io_error of the source of the unit fails the open. A signed unit is read like any other; its signature is
+/// returned, not verified (signature()).
 ///
 /// The reader refuses what affects safety or the meaning of the data, and reads departures from the specification that
 /// are unambiguous and harmless with a warning: among others, hexadecimal digits in uppercase, codec and checksum
@@ -102,13 +181,14 @@ struct pixel_read_options
 /// kept, a property or table that an object contains and names, or names twice, which it has once, and characters that
 /// XML 1.0 does not allow, such as control characters other than tab, line feed and carriage return, which are kept as
 /// written. A compressed block or subblock whose compressed size equals its uncompressed size is read as stored,
-/// without decompression, as PixInsight writes and reads a subblock that its codec did not make smaller
-/// (write_options::subblock_size); the specification does not say so, so codec output of exactly the size of its
-/// input, from another encoder, is not decoded.
+/// without decompression, and one longer than its data is decompressed, as spec §10.6.1 (Revision 2) defines; codec
+/// output of exactly the size of its input, which an encoder of an earlier revision could write and which the
+/// specification lets a decoder try to decompress first, is read as stored, as PixInsight reads it.
 ///
 /// The reader owns its source, so a file stays open as long as its reader exists. Its const member functions can be
-/// called from any number of threads at once, pixel reads included; load_ancillary_data(), the only function that
-/// changes it, needs exclusive access. It can be moved, and a moved-from reader can only be destroyed or assigned to.
+/// called from any number of threads at once, pixel reads included, which open the external files that a header-only
+/// open left closed one at a time; load_ancillary_data(), the only function that changes it, needs exclusive access.
+/// It can be moved, and a moved-from reader can only be destroyed or assigned to.
 class OPENXISF_API reader
 {
 public:
@@ -183,15 +263,30 @@ public:
     /// @throws usage_error when index is out of range.
     [[nodiscard]] const image_info& image(std::size_t index) const;
 
+    /// How the pixel data of the image at index are stored: the facts of its data block (block_info), from the header,
+    /// and for an external block from the block index of its file, without a read of the pixel data. An image that a
+    /// Reference lists again has the block of the image that it copies. For a unit opened with
+    /// read_options::header_only, the external file that holds the block is opened first, as a read of the pixels
+    /// opens it.
+    /// @throws usage_error when index is out of range.
+    /// @throws integrity_error, unsupported_error, invalid_data_error, limit_error or io_error when the data block of
+    ///         the image is unavailable, with the code of the error diagnostic about it, as read_pixels() throws them;
+    ///         and what the resolver throws besides io_error and unsupported_error when it opens the file of the block
+    ///         for a header-only open.
+    [[nodiscard]] block_info block(std::size_t index) const;
+
     /// Reads the pixel data of the image at index: its samples in native byte order, in the storage model of
     /// options.storage, or in that of the image. The data are verified against their checksum and decompressed first.
-    /// @throws usage_error when index is out of range.
+    /// With options.region, the samples of the region alone, in its rows; with options.pitch, the bytes that the rows
+    /// span, with zeros between them.
+    /// @throws usage_error when index is out of range, or the region or the pitch of options do not fit the image.
     /// @throws integrity_error when the data fail their checksum or do not decompress to their size.
     /// @throws unsupported_error, invalid_data_error or limit_error when the data block of the image is unavailable, or
     ///         larger than limits::max_allocation, with the code of the error diagnostic about it; and io_error or
     ///         unsupported_error, with that code, when the resolver could not open the external file of the block.
     /// @throws cancelled_error when options.progress returns false.
-    /// @throws io_error, or what a custom source throws, when the source fails.
+    /// @throws io_error, or what a custom source throws, when the source fails; and what the resolver throws besides
+    ///         io_error and unsupported_error when it opens the file of the block for a header-only open.
     [[nodiscard]] std::vector<std::byte> read_pixels(std::size_t index, const pixel_read_options& options = {}) const;
 
     /// Reads the pixel data of the image at index into destination, which must have exactly image(index).data_size()
@@ -200,6 +295,12 @@ public:
     /// besides: the stored bytes of compressed data, and for byte-shuffled data the buffer of their size that they are
     /// unshuffled from. When it throws, destination may hold part of the data, but never data that failed their
     /// checksum.
+    ///
+    /// With options.region, destination holds the samples of the region: exactly their bytes, or with options.pitch at
+    /// least the bytes from the start of the first row to the end of the last, of which it fills the rows alone. A
+    /// region allocates besides only what its reads need (pixel_read_options::region): a staging buffer of a few MiB
+    /// for runs read together, a few subblocks of a compressed block and their stored bytes, all of the stored bytes of
+    /// a block verified whole, and a buffer of the region's size when it changes its storage model.
     /// @throws usage_error when destination has another size.
     void read_pixels(std::size_t index, std::span<std::byte> destination, const pixel_read_options& options = {}) const;
 
@@ -209,13 +310,14 @@ public:
     template <pixel_sample T>
     [[nodiscard]] std::vector<T> read_pixels(std::size_t index, const pixel_read_options& options = {}) const
     {
-        std::vector<T> samples(sample_count_of(index, sample_format_of<T>()));
+        std::vector<T> samples(sample_count_of(index, sample_format_of<T>(), options));
         read_pixels(index, std::as_writable_bytes(std::span(samples)), options);
         return samples;
     }
 
-    /// Reads the samples of the image at index into destination, which must hold exactly its number of samples, as
-    /// values of T, the type of its sample format.
+    /// Reads the samples of the image at index into destination, which must hold exactly its number of samples, or
+    /// those of options.region, or with options.pitch at least those that the rows of the region span, as values of T,
+    /// the type of its sample format.
     /// @throws usage_error when T is another type or destination has another size; and what the other read_pixels()
     ///         throw.
     template <pixel_sample T>
@@ -225,10 +327,10 @@ public:
         read_pixels(index, std::as_writable_bytes(destination), options);
     }
 
-    /// The problems found while opening the unit, in the order they were found: at most 10,000, since a header can hold
-    /// a million. When there are more, the last diagnostic stands for itself and all those after it: its message says
-    /// how many they are, and it has the severity of the most serious of them and the code of the first of those,
-    /// without a context.
+    /// The problems found while opening the unit, in the order they were found: at most limits::max_diagnostics of the
+    /// options, 10,000 by default, since a header can hold a million. When there are more, the last diagnostic stands
+    /// for itself and all those after it: its message says how many they are, and it has the severity of the most
+    /// serious of them and the code of the first of those, without a context.
     [[nodiscard]] std::span<const diagnostic> diagnostics() const noexcept;
 
     /// True unless the unit was opened with read_options::header_only and load_ancillary_data() has not been called.
@@ -237,9 +339,8 @@ public:
     /// Loads what read_options::header_only left out: the reader then holds what an open without it gives, its
     /// diagnostics included. It reads the unit from its source again, so it fails like an open, with the options of the
     /// open; the reader is unchanged when it throws. It does nothing when the data are loaded. For a distributed unit,
-    /// it opens the external files again, through the resolver, before it closes those of the open, so up to twice
-    /// limits::max_external_files of them are open meanwhile; the blocks of a file that cannot be opened again are
-    /// unavailable afterwards, with a diagnostic.
+    /// it keeps the external files that reads of pixels opened, and opens the others through the resolver; the blocks
+    /// of a file that cannot be opened are unavailable afterwards, with a diagnostic.
     ///
     /// It changes the reader, so no other function may be called on it at the same time, and the references, pointers
     /// and spans that the reader returned before are invalid afterwards.
@@ -248,7 +349,13 @@ public:
 private:
     // The number of samples of the image at index, after checking that it has the given sample format, that its data
     // block is available and that its pixel data fit in limits::max_allocation, so that a typed read can allocate them.
+    // The typed reads of 1.0 called it, and the library keeps it.
     [[nodiscard]] std::size_t sample_count_of(std::size_t index, sample_format format) const;
+
+    // The number of samples that a typed read of the image at index with options allocates, with the checks of the
+    // other overload: those of the region of options, or with a pitch those that its rows span.
+    [[nodiscard]] std::size_t sample_count_of(std::size_t index, sample_format format,
+                                              const pixel_read_options& options) const;
 
     // Checks that the image at index has the given sample format, for a typed read into memory of the caller, which
     // allocates nothing.

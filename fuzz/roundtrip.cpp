@@ -5,9 +5,9 @@
 // properties of every type, tables, images of every sample format and storage model with their pixel data, FITS
 // keywords, ICC profiles, working spaces, display functions, colour filter arrays, resolutions and thumbnails; and the
 // options of a writer: codec, shuffling, subblocks, checksum, alignment and the largest inline block. The unit is
-// written as a monolithic file, or, by the last choice, as a distributed unit, to sinks that can rewrite and to sinks
-// that cannot, and each unit must open strictly, without a diagnostic, and hold the model. Any exception escapes and
-// fails the run.
+// written as a monolithic file, or, by a later choice, as a distributed unit, to sinks that can rewrite and to sinks
+// that cannot, and each unit must open strictly, without a diagnostic, and hold the model. The last choices are
+// regions of each image, which must read as the samples of the model in them. Any exception escapes and fails the run.
 
 #include <openxisf/color.h>
 #include <openxisf/error.h>
@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <span>
@@ -493,6 +494,82 @@ private:
         [this](std::span<const std::byte> data) { bytes_.insert(bytes_.end(), data.begin(), data.end()); }};
 };
 
+// A read of a region of an image: the region, and the storage model, the pitch and the verification of the read.
+struct region_read
+{
+    openxisf::pixel_region region{};
+    openxisf::pixel_storage storage = openxisf::pixel_storage::planar;
+    std::uint64_t pitch = 0;
+    bool verify = true;
+};
+
+// A region of the image, within it, and how it is read.
+region_read make_region_read(const image_info& image, choices& input)
+{
+    region_read read;
+    for (const std::uint64_t length : image.geometry.dimensions) {
+        const std::uint64_t start = input.below(length);
+        read.region.origin.push_back(start);
+        read.region.size.push_back(1 + input.below(length - start));
+    }
+    const std::uint64_t channels = image.geometry.channels;
+    read.region.first_channel = input.below(channels);
+    // 0 for every channel from the first.
+    read.region.channel_count = input.below(channels - read.region.first_channel + 1);
+    read.storage = input.flag() ? openxisf::pixel_storage::normal : openxisf::pixel_storage::planar;
+    const std::uint64_t count =
+        read.region.channel_count == 0 ? channels - read.region.first_channel : read.region.channel_count;
+    const std::uint64_t row = read.region.size.front() * (read.storage == openxisf::pixel_storage::normal ? count : 1);
+    read.pitch = input.flag() ? row + input.below(3) : 0;
+    read.verify = !input.flag();
+    return read;
+}
+
+// The samples of the region that read reads from pixels, the pixel data of image: in rows of the storage model of the
+// read, with zeros between them, computed sample by sample.
+std::vector<std::byte> expected_region(std::span<const std::byte> pixels, const image_info& image,
+                                       const region_read& read)
+{
+    const openxisf::geometry& shape = image.geometry;
+    const openxisf::pixel_region& region = read.region;
+    const std::size_t size = openxisf::sample_size(image.sample_format);
+    const std::uint64_t first = region.first_channel;
+    const std::uint64_t channels = region.channel_count == 0 ? shape.channels - first : region.channel_count;
+    std::uint64_t box = 1;
+    for (const std::uint64_t length : region.size) {
+        box *= length;
+    }
+    const bool planar = read.storage == openxisf::pixel_storage::planar || channels == 1;
+    const std::uint64_t width = region.size.front();
+    const std::uint64_t row = width * (planar ? 1 : channels);
+    const std::uint64_t rows = (box / width) * (planar ? channels : 1);
+    const std::uint64_t step = read.pitch == 0 ? row : read.pitch;
+    std::vector<std::byte> result((((rows - 1) * step) + row) * size);
+    const std::uint64_t pixel_count = shape.pixel_count();
+    for (std::uint64_t q = 0; q < box; ++q) {
+        // Pixel q of the region, the first axis fastest, and its index p in the image.
+        std::uint64_t rest = q;
+        std::uint64_t p = 0;
+        std::uint64_t scale = 1;
+        for (std::size_t a = 0; a < region.size.size(); ++a) {
+            p += (region.origin[a] + (rest % region.size[a])) * scale;
+            rest /= region.size[a];
+            scale *= shape.dimensions[a];
+        }
+        const std::uint64_t x = q % width;
+        for (std::uint64_t k = 0; k < channels; ++k) {
+            const std::uint64_t c = first + k;
+            const std::uint64_t from = image.pixel_storage == openxisf::pixel_storage::planar
+                                           ? (c * pixel_count) + p
+                                           : (p * shape.channels) + c;
+            const std::uint64_t to =
+                planar ? ((((k * (box / width)) + (q / width)) * step) + x) : ((q / width) * step) + (x * channels) + k;
+            std::memcpy(result.data() + (to * size), pixels.data() + (from * size), size);
+        }
+    }
+    return result;
+}
+
 openxisf::reader write_monolithic(const openxisf::writer& output, bool rewritable)
 {
     kept_output file(rewritable);
@@ -515,7 +592,7 @@ openxisf::reader write_distributed(const openxisf::writer& output, bool rewritab
                             {.strict = true, .resolver = resolver});
 }
 
-void check(const unit_model& model, const openxisf::reader& unit)
+void check(const unit_model& model, const std::vector<std::vector<region_read>>& regions, const openxisf::reader& unit)
 {
     require(unit.diagnostics().empty());
     require(canonical(unit.properties()) == canonical(model.properties));
@@ -529,6 +606,13 @@ void check(const unit_model& model, const openxisf::reader& unit)
     for (std::size_t i = 0; i < model.images.size(); ++i) {
         require_same(unit.image(i), model.images[i]);
         require(unit.read_pixels(i) == model.pixels[i]);
+        for (const region_read& read : regions[i]) {
+            require(unit.read_pixels(i, {.storage = read.storage,
+                                         .region = read.region,
+                                         .pitch = read.pitch,
+                                         .verify_checksum = read.verify}) ==
+                    expected_region(model.pixels[i], model.images[i], read));
+        }
     }
 }
 
@@ -541,8 +625,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     choices input(std::span(data, size));
     const openxisf::write_options options = make_options(input);
     const unit_model model = make_model(input);
-    // Last, so that the inputs written before distributed units existed keep their meaning.
+    // After the model, so that the inputs written before distributed units existed keep their meaning.
     const bool distributed = input.flag();
+    // Last, for the same reason: two regions of each image.
+    std::vector<std::vector<region_read>> regions;
+    regions.reserve(model.images.size());
+    for (const image_info& image : model.images) {
+        regions.push_back({make_region_read(image, input), make_region_read(image, input)});
+    }
 
     openxisf::writer output(options);
     output.metadata() = model.metadata;
@@ -552,7 +642,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         (void)output.add_image(model.images[i], model.pixels[i]);
     }
     for (const bool rewritable : {true, false}) {
-        check(model, distributed ? write_distributed(output, rewritable) : write_monolithic(output, rewritable));
+        check(model, regions,
+              distributed ? write_distributed(output, rewritable) : write_monolithic(output, rewritable));
     }
     return 0;
 }

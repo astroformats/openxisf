@@ -123,4 +123,26 @@ TEST(paths, a_canonical_path_names_the_file_itself)
 #endif
 }
 
+#if defined(_WIN32)
+TEST(paths, a_path_of_the_device_namespace_names_a_device_unless_a_file_system_follows)
+{
+    using openxisf::detail::names_a_device;
+    for (const std::string_view path :
+         {R"(\\.\NUL)", R"(\\.\COM1)", R"(\\.\CONIN$)", R"(\\.\pipe\name)", R"(\\?\pipe\name)", R"(\\.\mailslot\name)",
+          R"(\\.\PhysicalDrive0)", R"(\\.\C:)", R"(\\?\C:)", R"(\\.\C:name)", R"(\\?\GLOBALROOT\Device\Null)",
+          R"(\\?\GLOBALROOT\Device\HarddiskVolume1\unit.xisf)", R"(\\.\Volume{0})", R"(\\.\)", R"(\\?\)",
+          "//./pipe/name"}) {
+        EXPECT_TRUE(names_a_device(path)) << path;
+    }
+    // A drive and a separator, a network share or a volume go on with the path of a file, and the other forms of a
+    // path are not of the namespace.
+    for (const std::string_view path :
+         {R"(\\.\C:\)", R"(\\.\C:\dir\unit.xisf)", R"(\\?\c:\unit.xisf)", R"(\\?\UNC\server\share\unit.xisf)",
+          R"(\\.\unc\server\share\unit.xisf)", R"(\\?\Volume{0f6c3b71-0000-0000-0000-100000000000}\unit.xisf)",
+          R"(C:\dir\unit.xisf)", R"(\\server\share\unit.xisf)", "C:/dir/unit.xisf", "//./C:/unit.xisf"}) {
+        EXPECT_FALSE(names_a_device(path)) << path;
+    }
+}
+#endif
+
 } // namespace

@@ -120,6 +120,12 @@ enum class errc
     hash_failure,            ///< The hashing library (OpenSSL) failed for a reason other than the data.
     invalid_signature,       ///< An XML signature that is malformed, or does not name the root element (spec §9.5).
     missing_checksum,        ///< A data block outside the header of a signed unit, without a checksum (spec §10.5).
+    too_many_index_elements, ///< The block index of a data blocks file has more elements than
+                             ///< limits::max_index_elements.
+    too_many_model_objects,  ///< The header describes more objects than limits::max_model_objects.
+    not_editable,            ///< A data block or a unit that an editor cannot write in place.
+    zstd_expansion_too_large, ///< A Zstandard block that declares more bytes for each of its stored bytes than
+                              ///< limits::max_zstd_expansion.
 };
 
 /// Where in a unit a problem was found. Empty or absent members are unknown or do not apply.

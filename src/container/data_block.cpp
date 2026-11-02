@@ -9,10 +9,12 @@
 #include "core/data_encoding.h"
 #include "core/scratch_buffer.h"
 #include "core/text_grammar.h"
+#include "io/range_check.h"
 #include "xml/xml_document.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <limits>
 #include <string_view>
 #include <type_traits>
@@ -139,6 +141,8 @@ private:
         } catch (const invalid_data_error& failure) {
             fail(failure.code(), failure.what(), context);
         } catch (const unsupported_error& failure) {
+            fail(failure.code(), failure.what(), context);
+        } catch (const limit_error& failure) {
             fail(failure.code(), failure.what(), context);
         }
         return std::nullopt;
@@ -269,6 +273,7 @@ private:
             if (!descriptor_.checksum) {
                 return false;
             }
+            locate_digest(value->text, descriptor_.checksum->algorithm);
         } else if (context_.signed_unit && is_stored_apart(descriptor_.location.kind)) {
             // Spec §10.5: a signature covers the header, so the data of a block stored apart from it are covered only
             // through the checksum of the block.
@@ -322,6 +327,30 @@ private:
             log_.warning(errc::invalid_checksum, "the digest has uppercase hexadecimal digits", value.context);
         }
         return attempt([&text] { return parse_checksum(text); }, value.context);
+    }
+
+    // Where the digest of an attached block is in the source, value being its checksum attribute as parsed, of the
+    // given algorithm: on the element itself, as for every attachment, and written as it was parsed, algorithm:digest
+    // with the digest at its size, so that a digest of the same algorithm overwrites it, and the unit stays as it was
+    // but for its digits.
+    void locate_digest(std::string_view value, hash_algorithm algorithm)
+    {
+        if (descriptor_.location.kind != location_kind::attachment || context_.header_text.empty()) {
+            return;
+        }
+        const std::optional<std::size_t> start = element_offset(element_.node);
+        if (!start) {
+            return;
+        }
+        const std::optional<text_span> written = attribute_text(context_.header_text, *start, "checksum");
+        if (!written || context_.header_text.substr(written->offset, written->length) != value) {
+            return;
+        }
+        const std::size_t colon = value.find(':');
+        if (colon == std::string_view::npos || value.size() - colon - 1 != 2 * digest_size(algorithm)) {
+            return;
+        }
+        descriptor_.digest_offset = context_.header_text_offset + written->offset + colon + 1;
     }
 
     // The stored bytes of an inline or embedded block, and the place of an attached one.
@@ -440,8 +469,9 @@ private:
                                                                                             : descriptor_.data.size();
         const error_context& context = compression.subblocks.empty() ? compression_context_ : subblocks_context_;
         return attempt(
-                   [&compression, stored] {
+                   [this, &compression, stored] {
                        detail::check_subblocks(compression, stored);
+                       check_zstd_expansion(compression, stored, context_.max_zstd_expansion);
                        return true;
                    },
                    context)
@@ -480,10 +510,30 @@ private:
     error_context subblocks_context_{};
 };
 
-// Reads the stored bytes of an available block into destination, which has their size, and verifies them, in pieces
-// when there is a progress function. The errors have no context.
+// The own file of an available external block, or null for a block of the source of the unit. Throws unsupported_error
+// with errc::unsupported_location for an external block that has not been located.
+const thread_safe_source* external_file(const block_descriptor& descriptor)
+{
+    if (!is_external(descriptor.location.kind)) {
+        return nullptr;
+    }
+    if (!descriptor.external) {
+        throw unsupported_error(errc::unsupported_location, "the external data block has not been located");
+    }
+    return descriptor.external.get();
+}
+
+[[noreturn]] void throw_checksum_mismatch(const block_checksum& checksum)
+{
+    throw integrity_error(errc::checksum_mismatch, "the " + std::string(hash_name(checksum.algorithm)) +
+                                                       " digest of the data block differs from its checksum");
+}
+
+// Reads the stored bytes of an available block into destination, which has their size, and verifies them unless verify
+// is false, in pieces when there is a progress function. The errors have no context.
 void read_stored_into(const thread_safe_source& source, const block_descriptor& descriptor,
-                      std::span<std::byte> destination, const block_progress& progress, std::size_t piece_size)
+                      std::span<std::byte> destination, const block_progress& progress, std::size_t piece_size,
+                      bool verify = true)
 {
     if (!is_stored_apart(descriptor.location.kind)) {
         std::ranges::copy(descriptor.data, destination.begin());
@@ -492,12 +542,8 @@ void read_stored_into(const thread_safe_source& source, const block_descriptor& 
         }
         return;
     }
-    // An external block is in its own file.
-    const bool external = is_external(descriptor.location.kind);
-    if (external && !descriptor.external) {
-        throw unsupported_error(errc::unsupported_location, "the external data block has not been located");
-    }
-    const thread_safe_source& file = external ? *descriptor.external : source;
+    const thread_safe_source* external = external_file(descriptor);
+    const thread_safe_source& file = external != nullptr ? *external : source;
 
     if (!progress) {
         file.read(descriptor.location.position, destination);
@@ -509,13 +555,12 @@ void read_stored_into(const thread_safe_source& source, const block_descriptor& 
             progress(done);
         }
     }
-    // Spec §10.5 and §10.6.1: nothing is used, and so nothing is decompressed, before the digest matches. Bytes that
+    // Spec §10.5 and §10.6.2: nothing is used, and so nothing is decompressed, before the digest matches. Bytes that
     // fail it do not stay in the memory of the caller either.
-    if (descriptor.checksum &&
+    if (verify && descriptor.checksum &&
         compute_digest(descriptor.checksum->algorithm, destination) != descriptor.checksum->digest) {
         std::ranges::fill(destination, std::byte{0});
-        throw integrity_error(errc::checksum_mismatch, "the " + std::string(hash_name(descriptor.checksum->algorithm)) +
-                                                           " digest of the data block differs from its checksum");
+        throw_checksum_mismatch(*descriptor.checksum);
     }
 }
 
@@ -539,45 +584,39 @@ std::size_t stored_allocation(const block_descriptor& descriptor, const limits& 
     return checked_cast<std::size_t>(size);
 }
 
-// The stored bytes of an available block, verified, read in pieces when there is a progress function. The errors have
-// no context.
+// The stored bytes of an available block, verified unless verify is false, read in pieces when there is a progress
+// function. The errors have no context.
 std::vector<std::byte> read_stored_bytes(const thread_safe_source& source, const block_descriptor& descriptor,
-                                         const limits& limits, const block_progress& progress, std::size_t piece_size)
+                                         const limits& limits, const block_progress& progress, std::size_t piece_size,
+                                         bool verify = true)
 {
     std::vector<std::byte> data(stored_allocation(descriptor, limits));
-    read_stored_into(source, descriptor, data, progress, piece_size);
+    read_stored_into(source, descriptor, data, progress, piece_size, verify);
     return data;
 }
 
 // The stored bytes of an available compressed block, as read_stored_bytes() returns them, in a buffer that is only
 // decompressed from.
 scratch_buffer read_compressed_bytes(const thread_safe_source& source, const block_descriptor& descriptor,
-                                     const limits& limits, const block_progress& progress, std::size_t piece_size)
+                                     const limits& limits, const block_progress& progress, std::size_t piece_size,
+                                     bool verify = true)
 {
     scratch_buffer stored(stored_allocation(descriptor, limits));
-    read_stored_into(source, descriptor, stored.bytes(), progress, piece_size);
+    read_stored_into(source, descriptor, stored.bytes(), progress, piece_size, verify);
     return stored;
 }
 
-// The result of read, whose errors have no context, with the errors given the context of block: its element, and the
-// position of an attachment. What the source throws passes through.
-template <typename Read> decltype(auto) with_context_of(const data_block& block, Read&& read)
+// The data of an available block, as read_block_data() returns them, verified unless verify is false.
+std::vector<std::byte> read_data(const thread_safe_source& source, const block_descriptor& descriptor,
+                                 const limits& limits, const block_progress& progress, std::size_t piece_size,
+                                 bool verify)
 {
-    error_context context{.element = block.path};
-    if (block.descriptor && block.descriptor->location.kind == location_kind::attachment) {
-        context.offset = block.descriptor->location.position;
+    if (!descriptor.compression) {
+        return read_stored_bytes(source, descriptor, limits, progress, piece_size, verify);
     }
-    try {
-        return std::forward<Read>(read)();
-    } catch (const integrity_error& failure) {
-        throw integrity_error(failure.code(), failure.what(), std::move(context));
-    } catch (const limit_error& failure) {
-        throw limit_error(failure.code(), failure.what(), std::move(context));
-    } catch (const unsupported_error& failure) {
-        throw unsupported_error(failure.code(), failure.what(), std::move(context));
-    } catch (const invalid_data_error& failure) {
-        throw invalid_data_error(failure.code(), failure.what(), std::move(context));
-    }
+    const scratch_buffer stored = read_compressed_bytes(source, descriptor, limits, progress, piece_size, verify);
+    return decompress_block(stored.bytes(), *descriptor.compression, limits,
+                            decompression_progress(progress, stored.bytes().size()));
 }
 
 [[noreturn]] void throw_unavailable(const data_block& block)
@@ -587,6 +626,57 @@ template <typename Read> decltype(auto) with_context_of(const data_block& block,
     }
     throw usage_error(errc::invalid_argument, "the data block has neither a descriptor nor a problem",
                       {.element = block.path});
+}
+
+// The values of the API that name a location, a codec and a checksum algorithm. The block_location of the API is not
+// the one of this namespace, which holds the value of a location attribute.
+
+openxisf::block_location api_location(location_kind kind) noexcept
+{
+    switch (kind) {
+    case location_kind::inline_data:
+        return openxisf::block_location::inline_data;
+    case location_kind::embedded:
+        return openxisf::block_location::embedded;
+    case location_kind::attachment:
+        return openxisf::block_location::attachment;
+    case location_kind::url:
+    case location_kind::path:
+        break;
+    }
+    return openxisf::block_location::external;
+}
+
+codec api_codec(compression_codec value) noexcept
+{
+    switch (value) {
+    case compression_codec::zlib:
+        return codec::zlib;
+    case compression_codec::lz4:
+        return codec::lz4;
+    case compression_codec::lz4hc:
+        return codec::lz4hc;
+    case compression_codec::zstd:
+        break;
+    }
+    return codec::zstd;
+}
+
+checksum_algorithm api_algorithm(hash_algorithm algorithm) noexcept
+{
+    switch (algorithm) {
+    case hash_algorithm::sha1:
+        return checksum_algorithm::sha1;
+    case hash_algorithm::sha256:
+        return checksum_algorithm::sha256;
+    case hash_algorithm::sha512:
+        return checksum_algorithm::sha512;
+    case hash_algorithm::sha3_256:
+        return checksum_algorithm::sha3_256;
+    case hash_algorithm::sha3_512:
+        break;
+    }
+    return checksum_algorithm::sha3_512;
 }
 
 } // namespace
@@ -622,17 +712,18 @@ std::vector<std::byte> read_stored_block(const thread_safe_source& source, const
 }
 
 std::vector<std::byte> read_block(const thread_safe_source& source, const data_block& block, const limits& limits,
-                                  const block_progress& progress, std::size_t piece_size)
+                                  const block_progress& progress, std::size_t piece_size, bool verify)
 {
     if (!block.descriptor) {
         throw_unavailable(block);
     }
     const block_descriptor& descriptor = *block.descriptor;
-    return with_context_of(block, [&] { return read_block_data(source, descriptor, limits, progress, piece_size); });
+    return with_context_of(block, [&] { return read_data(source, descriptor, limits, progress, piece_size, verify); });
 }
 
 void read_block_into(const thread_safe_source& source, const data_block& block, const limits& limits,
-                     std::span<std::byte> destination, const block_progress& progress, std::size_t piece_size)
+                     std::span<std::byte> destination, const block_progress& progress, std::size_t piece_size,
+                     bool verify)
 {
     if (!block.descriptor) {
         throw_unavailable(block);
@@ -646,10 +737,10 @@ void read_block_into(const thread_safe_source& source, const data_block& block, 
     }
     with_context_of(block, [&] {
         if (!descriptor.compression) {
-            read_stored_into(source, descriptor, destination, progress, piece_size);
+            read_stored_into(source, descriptor, destination, progress, piece_size, verify);
             return;
         }
-        const scratch_buffer stored = read_compressed_bytes(source, descriptor, limits, progress, piece_size);
+        const scratch_buffer stored = read_compressed_bytes(source, descriptor, limits, progress, piece_size, verify);
         decompress_block_into(stored.bytes(), *descriptor.compression, limits, destination,
                               decompression_progress(progress, stored.bytes().size()));
     });
@@ -658,12 +749,43 @@ void read_block_into(const thread_safe_source& source, const data_block& block, 
 std::vector<std::byte> read_block_data(const thread_safe_source& source, const block_descriptor& descriptor,
                                        const limits& limits, const block_progress& progress, std::size_t piece_size)
 {
-    if (!descriptor.compression) {
-        return read_stored_bytes(source, descriptor, limits, progress, piece_size);
+    return read_data(source, descriptor, limits, progress, piece_size, true);
+}
+
+void read_stored_part(const thread_safe_source& source, const block_descriptor& descriptor, std::uint64_t offset,
+                      std::span<std::byte> destination)
+{
+    const thread_safe_source* external = external_file(descriptor);
+    (external != nullptr ? *external : source).read(descriptor.location.position + offset, destination);
+}
+
+std::span<const std::byte> stored_in_memory(const thread_safe_source& source, const block_descriptor& descriptor)
+{
+    if (!is_stored_apart(descriptor.location.kind)) {
+        return descriptor.data;
     }
-    const scratch_buffer stored = read_compressed_bytes(source, descriptor, limits, progress, piece_size);
-    return decompress_block(stored.bytes(), *descriptor.compression, limits,
-                            decompression_progress(progress, stored.bytes().size()));
+    const thread_safe_source* external = external_file(descriptor);
+    const thread_safe_source& file = external != nullptr ? *external : source;
+    if (file.bytes().empty()) {
+        return {};
+    }
+    check_read_range(file.size(), descriptor.location.position, checked_cast<std::size_t>(descriptor.location.size),
+                     file.description());
+    return file.bytes().subspan(checked_cast<std::size_t>(descriptor.location.position),
+                                checked_cast<std::size_t>(descriptor.location.size));
+}
+
+void verify_stored(const block_descriptor& descriptor, std::span<const std::byte> stored)
+{
+    if (descriptor.checksum && compute_digest(descriptor.checksum->algorithm, stored) != descriptor.checksum->digest) {
+        throw_checksum_mismatch(*descriptor.checksum);
+    }
+}
+
+scratch_buffer read_stored_buffer(const thread_safe_source& source, const block_descriptor& descriptor,
+                                  const limits& limits, const block_progress& progress, std::size_t piece_size)
+{
+    return read_compressed_bytes(source, descriptor, limits, progress, piece_size);
 }
 
 std::uint64_t stored_size(const block_descriptor& descriptor) noexcept
@@ -687,6 +809,31 @@ std::uint64_t work_size(const block_descriptor& descriptor) noexcept
     const std::uint64_t uncompressed = descriptor.compression->uncompressed_size;
     return uncompressed > std::numeric_limits<std::uint64_t>::max() - stored ? std::numeric_limits<std::uint64_t>::max()
                                                                              : stored + uncompressed;
+}
+
+block_info info_of(const block_descriptor& descriptor) noexcept
+{
+    block_info info{.location = api_location(descriptor.location.kind),
+                    .byte_order = descriptor.order == byte_order::big ? std::endian::big : std::endian::little,
+                    .stored_size = stored_size(descriptor),
+                    .uncompressed_size = data_size(descriptor)};
+    if (descriptor.compression) {
+        const block_compression& compression = *descriptor.compression;
+        info.codec = api_codec(compression.codec);
+        info.byte_shuffle = compression.item_size != 0;
+        if (compression.subblocks.empty()) {
+            info.subblock_size = compression.uncompressed_size;
+            info.subblock_count = 1;
+        } else {
+            info.subblock_size =
+                std::ranges::max(compression.subblocks, {}, &subblock::uncompressed_size).uncompressed_size;
+            info.subblock_count = compression.subblocks.size();
+        }
+    }
+    if (descriptor.checksum) {
+        info.checksum = api_algorithm(descriptor.checksum->algorithm);
+    }
+    return info;
 }
 
 } // namespace openxisf::detail

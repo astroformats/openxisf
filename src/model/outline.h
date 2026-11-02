@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <openxisf/limits.h>
+
 #include "core/diagnostic_log.h"
 
 #include <pugixml.hpp>
@@ -96,6 +98,9 @@ struct unit_outline
 /// - a uid of several core elements is an error, and so is a Reference without a ref attribute, or one that names no
 ///   element (errc::dangling_reference), a uid of several elements (errc::duplicate_uid) or another Reference
 ///   (errc::chained_reference).
-[[nodiscard]] unit_outline build_outline(const pugi::xml_node& root, diagnostic_log& log);
+///
+/// Throws limit_error with errc::too_many_model_objects when more elements than limits.max_model_objects become
+/// objects of the model: those of every kind but Metadata, Reference, Structure, Row, Cell and Data.
+[[nodiscard]] unit_outline build_outline(const pugi::xml_node& root, const limits& limits, diagnostic_log& log);
 
 } // namespace openxisf::detail

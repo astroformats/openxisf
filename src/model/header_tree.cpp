@@ -131,11 +131,16 @@ public:
         return element;
     }
 
-    xml_element image_element(const image_info& image, std::span<const std::byte> pixels, const std::string& uuid)
+    xml_element image_element(const image_info& image, std::optional<std::span<const std::byte>> pixels,
+                              const std::string& uuid)
     {
         xml_element element{.name = "Image"};
         add_image_attributes(element, image, uuid);
-        add_pixel_block(element, pixels, image.sample_format);
+        if (pixels) {
+            add_pixel_block(element, *pixels, image.sample_format);
+        } else {
+            add_reserved_block(element, image.data_size());
+        }
         add_described_children(element, image);
         if (image.color_filter_array) {
             const color_filter_array& filter = *image.color_filter_array;
@@ -190,6 +195,13 @@ private:
         blocks_.push_back({.borrowed = pixels,
                            .item_size = item_size,
                            .native_order = std::endian::native == std::endian::big && item_size > 1});
+    }
+
+    // The pixel data of a reserved image, size bytes of zeros, which are attached as all pixel data are.
+    void add_reserved_block(xml_element& element, std::uint64_t size)
+    {
+        element.block = blocks_.size();
+        blocks_.push_back({.reserved_size = size});
     }
 
     void serialize_value(xml_element& element, const property_value& value)
@@ -470,7 +482,7 @@ std::string format_header(const header_tree& tree, std::span<const xml_element> 
     std::string text =
         R"(<?xml version="1.0" encoding="UTF-8"?>)"
         "\n<!--\nExtensible Image Serialization Format - XISF version 1.0\nCreated with "
-        "OpenXISF " OPENXISF_VERSION_STRING " - https://github.com/openxisf/openxisf\n-->\n"
+        "OpenXISF " OPENXISF_VERSION_STRING " - https://github.com/astroformats/openxisf\n-->\n"
         R"(<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf")"
         R"( xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance")"
         R"( xsi:schemaLocation="http://www.pixinsight.com/xisf http://pixinsight.com/xisf/xisf-1.0.xsd">)"

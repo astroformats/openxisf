@@ -50,6 +50,10 @@ public:
     /// errc::open_failed or errc::not_a_regular_file, which a directory, the root of a drive or a share included, is.
     [[nodiscard]] static native_file open_for_reading(const std::string& path);
 
+    /// Opens an existing regular file for reading and writing, with the checks of open_for_reading(). A file that the
+    /// process may not write is errc::open_failed.
+    [[nodiscard]] static native_file open_for_update(const std::string& path);
+
     /// Creates a file for writing, or returns nothing when something exists at path already. name is the path of the
     /// file it becomes, which error messages use. Throws io_error with errc::open_failed.
     [[nodiscard]] static std::optional<native_file> create_new(const std::string& path, std::string name);
@@ -90,11 +94,13 @@ public:
         return name_;
     }
 
-    /// Opens for reading the regular file that find() found, with the same name. On Windows it is the file found,
-    /// through its handle, whatever its path names by then; on POSIX systems it is the file at the canonical path,
-    /// which a change of the directory tree since find() can make another one. Throws io_error with errc::open_failed
-    /// or errc::not_a_regular_file.
-    [[nodiscard]] native_file reopen_for_reading() const;
+    /// Opens for reading the regular file that find() found, with the same name, inside directory, the name that find()
+    /// gave a directory (is_inside()). On Windows it is the file found, through its handle, whatever its path names by
+    /// then. On POSIX systems it is the file that its canonical path names, reached from directory one step at a time:
+    /// each directory opened from the one before, and the file from the last, without following a symbolic link, so
+    /// that a change of the directory tree since find() fails the open rather than lead outside directory. Throws
+    /// io_error with errc::open_failed or errc::not_a_regular_file.
+    [[nodiscard]] native_file reopen_for_reading(const std::string& directory) const;
 
     [[nodiscard]] std::uint64_t size() const;
 
@@ -102,6 +108,9 @@ public:
     void read_at(std::uint64_t offset, std::span<std::byte> destination) const;
 
     void write_at(std::uint64_t offset, std::span<const std::byte> data) const;
+
+    /// Flushes what was written to the storage device. Throws io_error with errc::write_failed.
+    void flush_to_disk() const;
 
     /// Closes the file, which create_new() made at path, and moves it over target, which it replaces atomically, also
     /// while other programs read target. With flush_to_disk, the content and the rename reach the storage device
@@ -118,7 +127,9 @@ public:
 private:
     native_file(handle_type handle, std::string name) noexcept : handle_(handle), name_(std::move(name)) {}
 
-    void flush_to_disk() const;
+    // Opens an existing regular file with the given access, after the checks of open_for_reading().
+    [[nodiscard]] static native_file open_existing(const std::string& path, bool writable);
+
     // Closes the file and reports a failure, which may be a delayed write error.
     void close();
 

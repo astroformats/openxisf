@@ -7,6 +7,7 @@
 #include <openxisf/error.h>
 #include <openxisf/io.h>
 
+#include "io/native_file.h"
 #include "support/bytes.h"
 #include "support/files.h"
 #include "support/links.h"
@@ -186,6 +187,59 @@ TEST_F(file_resolver_test, follows_symbolic_links_only_inside_the_directory)
     EXPECT_EQ(open("up/unit/data.xisb"), "inside");
 }
 
+TEST_F(file_resolver_test, follows_links_to_directories_relative_links_and_chains_inside_the_directory)
+{
+    if (!openxisf::test::create_symbolic_link(unit_directory / "sub", unit_directory / "down")) {
+        GTEST_SKIP() << "the system does not let this process create symbolic links";
+    }
+    EXPECT_EQ(open("down/more.dat"), "deeper");
+    ASSERT_TRUE(openxisf::test::create_symbolic_link("sub/more.dat", unit_directory / "relative"));
+    EXPECT_EQ(open("relative"), "deeper");
+    ASSERT_TRUE(openxisf::test::create_symbolic_link(unit_directory / "relative", unit_directory / "chain"));
+    EXPECT_EQ(open("chain"), "deeper");
+    ASSERT_TRUE(openxisf::test::create_symbolic_link("../outside.dat", unit_directory / "relative_out"));
+    EXPECT_TRUE(refuses<openxisf::unsupported_error>("relative_out", errc::location_not_allowed));
+    // Links that lead to each other lead to no file.
+    ASSERT_TRUE(openxisf::test::create_symbolic_link(unit_directory / "loop_b", unit_directory / "loop_a"));
+    ASSERT_TRUE(openxisf::test::create_symbolic_link(unit_directory / "loop_a", unit_directory / "loop_b"));
+    EXPECT_TRUE(refuses<openxisf::io_error>("loop_a", errc::open_failed));
+}
+
+TEST(native_file, the_file_reopened_is_the_one_found_whatever_the_directory_tree_becomes)
+{
+    // A directory of the path of the file found is swapped for a link to another one before the file is opened: the
+    // read does not follow it there. Windows reads the file through the handle that found it, and does not rename a
+    // directory that holds it while that handle is open; other systems open it from the directory step by step,
+    // without following a link, and fail.
+    using openxisf::detail::native_file;
+    const temp_directory root;
+    std::filesystem::create_directories(root.path() / "unit" / "sub");
+    std::filesystem::create_directory(root.path() / "outside");
+    write_file(root.path() / "unit" / "sub" / "more.dat", bytes("deeper"));
+    write_file(root.path() / "outside" / "more.dat", bytes("outside"));
+    const std::string base = native_file::find(utf8(root.path() / "unit")).name();
+    const native_file found = native_file::find(utf8(root.path() / "unit" / "sub" / "more.dat"));
+
+    std::error_code moved;
+    std::filesystem::rename(root.path() / "unit" / "sub", root.path() / "unit" / "moved", moved);
+    if (!moved) {
+#if defined(_WIN32)
+        openxisf::test::create_junction(root.path() / "outside", root.path() / "unit" / "sub");
+#else
+        ASSERT_TRUE(openxisf::test::create_symbolic_link(root.path() / "outside", root.path() / "unit" / "sub"));
+#endif
+    }
+    try {
+        const native_file reopened = found.reopen_for_reading(base);
+        std::vector<std::byte> data(reopened.size());
+        reopened.read_at(0, data);
+        EXPECT_EQ(openxisf::test::text(data), "deeper");
+    } catch (const openxisf::io_error& failure) {
+        EXPECT_EQ(failure.code(), errc::open_failed);
+        EXPECT_FALSE(moved) << "the open failed, but nothing changed";
+    }
+}
+
 #if defined(_WIN32)
 TEST_F(file_resolver_test, follows_junctions_only_inside_the_directory)
 {
@@ -286,6 +340,18 @@ TEST_F(file_resolver_test, refuses_absolute_paths_unless_allowed)
         openxisf::file_resolver(directory(), {.absolute_paths = true})(reference);
     ASSERT_NE(source, nullptr);
     EXPECT_EQ(source->size(), 7U);
+
+    // A . or .. step follows a directory, as in a relative path.
+    const openxisf::external_resolver allowed = openxisf::file_resolver(directory(), {.absolute_paths = true});
+    const auto open_absolute = [&allowed](const std::string& location) {
+        return allowed({.form = location_form::absolute_path, .location = location});
+    };
+    const std::string parent = path.substr(0, path.size() - std::string_view("/outside.dat").size());
+    EXPECT_EQ(open_absolute(parent + "/./outside.dat")->size(), 7U);
+    EXPECT_EQ(open_absolute(parent + "/unit/../outside.dat")->size(), 7U);
+    for (const std::string& location : {path + "/.", path + "/..", path + "/../outside.dat"}) {
+        EXPECT_TRUE(throws<openxisf::io_error>(errc::open_failed, [&] { (void)open_absolute(location); })) << location;
+    }
 }
 
 TEST_F(file_resolver_test, refuses_urls)

@@ -6,6 +6,7 @@
 #include <openxisf/astrometry.h>
 #include <openxisf/color.h>
 #include <openxisf/display.h>
+#include <openxisf/editor.h>
 #include <openxisf/error.h>
 #include <openxisf/export.h>
 #include <openxisf/format.h>

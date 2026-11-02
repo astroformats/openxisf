@@ -19,8 +19,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -31,6 +33,7 @@
 
 namespace {
 
+using openxisf::block_location;
 using openxisf::color_space;
 using openxisf::errc;
 using openxisf::image_info;
@@ -527,6 +530,183 @@ TEST(conformance_image, a_typed_read_checks_the_allocation_limit_before_it_alloc
     EXPECT_EQ(data, stored);
     EXPECT_TRUE(throws<openxisf::limit_error>(errc::allocation_too_large,
                                               [&plain] { (void)plain.read_pixels<std::uint8_t>(0); }));
+}
+
+TEST(conformance_image, regions_are_read_as_values_of_their_sample_format)
+{
+    // 3 x 2 pixels of 2 channels, 16-bit: sample c of pixel p is 10c + p.
+    const reader file = open_body(image(R"(geometry="3:2:2" sampleFormat="UInt16")", "000001000200030004000500"
+                                                                                     "0a000b000c000d000e000f00"));
+    // Channel 1 of the pixels (1, 0), (2, 0), (1, 1) and (2, 1), whose rows are 3 samples apart with a pitch.
+    const openxisf::pixel_region region{.origin = {1, 0}, .size = {2, 2}, .first_channel = 1};
+    EXPECT_EQ(file.read_pixels<std::uint16_t>(0, {.region = region}), (std::vector<std::uint16_t>{11, 12, 14, 15}));
+    EXPECT_EQ(file.read_pixels<std::uint16_t>(0, {.region = region, .pitch = 3}),
+              (std::vector<std::uint16_t>{11, 12, 0, 14, 15}));
+    // Both channels, interleaved, into memory of the application.
+    std::vector<std::uint16_t> samples(8);
+    file.read_pixels(0, std::span(samples),
+                     {.storage = pixel_storage::normal, .region = openxisf::pixel_region{.origin = {1, 0}}});
+    EXPECT_EQ(samples, (std::vector<std::uint16_t>{1, 11, 2, 12, 4, 14, 5, 15}));
+    std::vector<std::byte> data(8);
+    file.read_pixels(0, data, {.region = region});
+    EXPECT_EQ(data, file.read_pixels(0, {.region = region}));
+
+    const auto usage = [](auto&& read) {
+        return throws<openxisf::usage_error>(errc::invalid_argument, std::forward<decltype(read)>(read));
+    };
+    EXPECT_TRUE(usage([&file, &region] { (void)file.read_pixels<std::uint8_t>(0, {.region = region}); }));
+    EXPECT_TRUE(usage(
+        [&file] { (void)file.read_pixels<std::uint16_t>(0, {.region = openxisf::pixel_region{.origin = {3, 0}}}); }));
+    EXPECT_TRUE(usage([&file, &samples, &region] { file.read_pixels(0, std::span(samples), {.region = region}); }));
+    EXPECT_TRUE(usage([&file, &region] { (void)file.read_pixels<std::uint16_t>(0, {.region = region, .pitch = 1}); }));
+}
+
+TEST(conformance_image, a_typed_read_of_a_region_allocates_the_region)
+{
+    // A block beyond the allocation limit, of which a region within the limit is read.
+    const openxisf::read_options options{.limits = {.max_allocation = 1000}};
+    const std::vector<std::byte> stored = openxisf::test::pattern(1001);
+    const reader file = open_attached(R"(<Image geometry="1001:1:1" sampleFormat="UInt8" location="attachment:{0}"/>)",
+                                      {stored}, options);
+    EXPECT_TRUE(no_diagnostics(file.diagnostics()));
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::allocation_too_large,
+                                              [&file] { (void)file.read_pixels<std::uint8_t>(0); }));
+    const std::vector<std::uint8_t> region =
+        file.read_pixels<std::uint8_t>(0, {.region = openxisf::pixel_region{.origin = {990, 0}}});
+    EXPECT_TRUE(std::ranges::equal(std::as_bytes(std::span(region)), std::span(stored).subspan(990)));
+    // A whole read of the image as a region is beyond the limit, as the image is.
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::allocation_too_large, [&file] {
+        (void)file.read_pixels<std::uint8_t>(0, {.region = openxisf::pixel_region{}});
+    }));
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+// How the pixel data are stored
+
+TEST(conformance_image, the_block_of_an_image_says_where_it_is_stored_and_its_sizes)
+{
+    // Spec §10.3, §10.4: the location of the block, the byte order of its samples, and its bytes as stored.
+    EXPECT_EQ(open_body(pair_image()).block(0),
+              (openxisf::block_info{.location = block_location::embedded, .stored_size = 2, .uncompressed_size = 2}));
+    EXPECT_EQ(
+        open_body(R"(<Image geometry="2:1:1" sampleFormat="UInt8" location="inline:hex">0102</Image>)").block(0),
+        (openxisf::block_info{.location = block_location::inline_data, .stored_size = 2, .uncompressed_size = 2}));
+    const reader attached = open_attached(R"(<Image geometry="2:1:1" sampleFormat="UInt16" location="attachment:{0}"/>)"
+                                          R"(<Image geometry="2:1:1" sampleFormat="UInt16" byteOrder="big" )"
+                                          R"(location="attachment:{0}"/>)",
+                                          {bytes("\x01\x02\x03\x04")});
+    EXPECT_EQ(attached.block(0),
+              (openxisf::block_info{.location = block_location::attachment, .stored_size = 4, .uncompressed_size = 4}));
+    // The facts are those of the element: two elements with one attachment have a block each.
+    EXPECT_EQ(attached.block(1), (openxisf::block_info{.location = block_location::attachment,
+                                                       .byte_order = std::endian::big,
+                                                       .stored_size = 4,
+                                                       .uncompressed_size = 4}));
+}
+
+TEST(conformance_image, the_block_of_an_image_names_its_codec_its_shuffling_and_its_largest_subblock)
+{
+    // Spec §10.6: a block compressed as a whole is one subblock. Nothing is decompressed, so the bytes need not be
+    // those of the codec.
+    struct form
+    {
+        std::string_view compression{};
+        std::string_view subblocks{};
+        openxisf::codec codec = openxisf::codec::zlib;
+        bool shuffled = false;
+        std::uint64_t subblock_size = 0;
+        std::uint64_t subblock_count = 0;
+    };
+    for (const form& expected : {form{.compression = "zlib:600", .subblock_size = 600, .subblock_count = 1},
+                                 form{.compression = "lz4+sh:600:2",
+                                      .codec = openxisf::codec::lz4,
+                                      .shuffled = true,
+                                      .subblock_size = 600,
+                                      .subblock_count = 1},
+                                 form{.compression = "lz4hc:600",
+                                      .subblocks = "40,256:40,256:20,88",
+                                      .codec = openxisf::codec::lz4hc,
+                                      .subblock_size = 256,
+                                      .subblock_count = 3},
+                                 form{.compression = "zstd+sh:600:2",
+                                      .subblocks = "40,88:40,256:20,256",
+                                      .codec = openxisf::codec::zstd,
+                                      .shuffled = true,
+                                      .subblock_size = 256,
+                                      .subblock_count = 3}}) {
+        const std::string subblocks =
+            expected.subblocks.empty() ? std::string() : R"( subblocks=")" + std::string(expected.subblocks) + "\"";
+        const reader file =
+            open_attached(R"(<Image geometry="300:1:1" sampleFormat="UInt16" compression=")" +
+                              std::string(expected.compression) + "\"" + subblocks + R"( location="attachment:{0}"/>)",
+                          {std::vector<std::byte>(100)});
+        EXPECT_TRUE(no_diagnostics(file.diagnostics())) << expected.compression;
+        EXPECT_EQ(file.block(0), (openxisf::block_info{.location = block_location::attachment,
+                                                       .codec = expected.codec,
+                                                       .byte_shuffle = expected.shuffled,
+                                                       .subblock_size = expected.subblock_size,
+                                                       .subblock_count = expected.subblock_count,
+                                                       .stored_size = 100,
+                                                       .uncompressed_size = 600}))
+            << expected.compression;
+    }
+}
+
+TEST(conformance_image, the_block_of_an_image_names_its_checksum_algorithm)
+{
+    // Spec §10.5, Table 9. An attached block is verified when it is read, so the digests need only their size.
+    struct form
+    {
+        std::string_view name{};
+        std::size_t digits = 0;
+        openxisf::checksum_algorithm algorithm = openxisf::checksum_algorithm::sha1;
+    };
+    for (const form& expected :
+         {form{.name = "sha1", .digits = 40},
+          form{.name = "sha-256", .digits = 64, .algorithm = openxisf::checksum_algorithm::sha256},
+          form{.name = "sha512", .digits = 128, .algorithm = openxisf::checksum_algorithm::sha512},
+          form{.name = "sha3-256", .digits = 64, .algorithm = openxisf::checksum_algorithm::sha3_256},
+          form{.name = "sha3-512", .digits = 128, .algorithm = openxisf::checksum_algorithm::sha3_512}}) {
+        const reader file =
+            open_attached(R"(<Image geometry="2:1:1" sampleFormat="UInt8" location="attachment:{0}" )"
+                          R"(checksum=")" +
+                              std::string(expected.name) + ":" + std::string(expected.digits, '0') + R"("/>)",
+                          {bytes("\x01\x02")});
+        EXPECT_TRUE(no_diagnostics(file.diagnostics())) << expected.name;
+        EXPECT_EQ(file.block(0), (openxisf::block_info{.location = block_location::attachment,
+                                                       .checksum = expected.algorithm,
+                                                       .stored_size = 2,
+                                                       .uncompressed_size = 2}))
+            << expected.name;
+    }
+}
+
+TEST(conformance_image, the_block_of_an_external_image_is_located_first)
+{
+    // Spec §9.4, §10.3: the block index of its file gives the size of the block, so a header-only open opens the file
+    // for the facts of the block, as for its pixels, and once.
+    auto opened = std::make_shared<std::vector<std::string>>();
+    const reader file = openxisf::test::open_unit(
+        bytes(header_xml(R"(<Image geometry="3:1:1" sampleFormat="UInt8" location="path(@header_dir/unit.xisb):1"/>)")),
+        {.header_only = true,
+         .resolver = openxisf::test::memory_resolver(
+             {{"unit.xisb", openxisf::test::blocks_file_of({bytes("abc")}, {1})}}, opened)});
+    EXPECT_TRUE(opened->empty());
+    const openxisf::block_info external{.location = block_location::external, .stored_size = 3, .uncompressed_size = 3};
+    EXPECT_EQ(file.block(0), external);
+    EXPECT_EQ(file.block(0), external);
+    EXPECT_EQ(*opened, std::vector<std::string>{"unit.xisb"});
+}
+
+TEST(conformance_image, the_block_of_an_unavailable_image_throws_the_error_of_a_read)
+{
+    // Spec §7: the facts of a block that cannot be read are not known.
+    const reader file =
+        open_attached(R"(<Image geometry="2:1:1" sampleFormat="UInt8" compression="rle:2" location="attachment:{0}"/>)",
+                      {bytes("ab")});
+    ASSERT_EQ(file.images().size(), 1U);
+    EXPECT_TRUE(throws<openxisf::unsupported_error>(errc::unsupported_compression, [&file] { (void)file.block(0); }));
+    EXPECT_TRUE(throws<openxisf::usage_error>(errc::invalid_argument, [&file] { (void)file.block(1); }));
 }
 
 // -----------------------------------------------------------------------------------------------------------------

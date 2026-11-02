@@ -373,6 +373,21 @@ TEST(samples_d4, the_first_two_images_are_those_of_a2_and_a4)
     EXPECT_EQ(file.read_pixels(1), open_sample("A4").read_pixels(0));
 }
 
+TEST(samples_d4, each_image_has_a_block_of_its_own)
+{
+    // PixInsight embeds a block of up to 3072 bytes in the header, as for the samples of group A.
+    const openxisf::reader file = open_sample("D4");
+    EXPECT_EQ(file.block(0),
+              (openxisf::block_info{
+                  .location = openxisf::block_location::embedded, .stored_size = 1702, .uncompressed_size = 1702}));
+    EXPECT_EQ(file.block(1),
+              (openxisf::block_info{
+                  .location = openxisf::block_location::attachment, .stored_size = 10212, .uncompressed_size = 10212}));
+    EXPECT_EQ(file.block(2),
+              (openxisf::block_info{
+                  .location = openxisf::block_location::embedded, .stored_size = 77, .uncompressed_size = 77}));
+}
+
 TEST(samples_d4, the_third_image_increases_in_storage_order)
 {
     // The expression (x() + 11*y())/76 gives pixel i the value i / 76, rounded to 8 bits.

@@ -169,8 +169,8 @@ TEST(compressed_block, a_block_above_the_subblock_size_is_divided_and_shuffled_b
     }
 }
 
-// PixInsight writes a subblock that does not compress as it is, with equal sizes (see the large sample L1), and reads
-// codec output that is not smaller than its data as data stored as they are, so the encoder stores such subblocks so.
+// Spec §10.6.1: a subblock that the codec would not make shorter is stored as it is, with equal sizes, as PixInsight
+// writes it (see the large sample L1) and as PixInsight 1.9.5 read any subblock that is not smaller than its data.
 TEST(compressed_block, a_subblock_that_does_not_compress_is_stored_as_it_is)
 {
     // 4,000 bytes that every codec compresses, followed by 4,000 bytes of noise, which none does.
@@ -196,7 +196,8 @@ TEST(compressed_block, a_subblock_that_does_not_compress_is_stored_as_it_is)
 
 TEST(compressed_block, codec_output_of_the_size_of_its_data_is_not_stored)
 {
-    // Equal sizes mean data stored as they are, so codec output exactly as long as its data would be read back as data.
+    // Equal sizes mean data stored as they are (spec §10.6.1), so codec output exactly as long as its data would be
+    // read back as data.
     // Noise, a run of zeros and noise again: LZ4 spends a few bytes on the noise and saves on the run, and for some
     // lengths of the two they are equal. Those are searched for, since versions of LZ4 differ.
     constexpr std::size_t head = 1000;
@@ -272,6 +273,85 @@ TEST(compressed_block, a_subblock_with_equal_sizes_is_copied_whatever_the_codec_
                            std::uint64_t{1} << 40)
                   .size(),
               1U);
+}
+
+// Compresses data with the adapter of codec alone, whatever the size of the output.
+std::vector<std::byte> codec_output(compression_codec codec, std::span<const std::byte> data)
+{
+    std::vector<std::byte> output;
+    switch (codec) {
+    case compression_codec::zlib:
+        openxisf::detail::zlib_compress(data, openxisf::detail::zlib_default_level, output);
+        break;
+    case compression_codec::lz4:
+        openxisf::detail::lz4_compress(data, output);
+        break;
+    case compression_codec::lz4hc:
+        openxisf::detail::lz4hc_compress(data, openxisf::detail::lz4hc_default_level, output);
+        break;
+    case compression_codec::zstd:
+        openxisf::detail::zstd_compress(data, openxisf::detail::zstd_default_level, output);
+        break;
+    }
+    return output;
+}
+
+// 500 bytes that no codec makes shorter; the pattern of tests/support/bytes.h is what every codec makes shorter.
+std::vector<std::byte> noise()
+{
+    std::vector<std::byte> data(500);
+    std::uint32_t state = 99;
+    for (std::byte& value : data) {
+        state = (state * 1'664'525U) + 1'013'904'223U;
+        value = static_cast<std::byte>(state >> 24U);
+    }
+    return data;
+}
+
+std::vector<std::byte> joined(const std::vector<std::byte>& first, const std::vector<std::byte>& second)
+{
+    std::vector<std::byte> both(first.size() + second.size());
+    std::ranges::copy(second, std::ranges::copy(first, both.begin()).out);
+    return both;
+}
+
+TEST(compressed_block, a_subblock_longer_than_its_data_is_decompressed)
+{
+    // Spec §10.6.1: an encoder of an earlier revision could compress a subblock that got longer, and such a subblock
+    // is decompressed, as a whole block and beside a subblock that got shorter.
+    const std::vector<std::byte> random = noise();
+    const std::vector<std::byte> ramp = openxisf::test::pattern(1000);
+    for (const compression_codec codec : all_codecs) {
+        SCOPED_TRACE(name_of(codec));
+        const std::vector<std::byte> longer = codec_output(codec, random);
+        ASSERT_GT(longer.size(), random.size());
+        const std::vector<std::byte> shorter = codec_output(codec, ramp);
+        ASSERT_LT(shorter.size(), ramp.size());
+
+        EXPECT_EQ(decompress_block(longer, {.codec = codec, .uncompressed_size = random.size()}, {}), random);
+
+        const block_compression compression{
+            .codec = codec,
+            .uncompressed_size = random.size() + ramp.size(),
+            .subblocks = {{.compressed_size = longer.size(), .uncompressed_size = random.size()},
+                          {.compressed_size = shorter.size(), .uncompressed_size = ramp.size()}}};
+        EXPECT_EQ(decompress_block(joined(longer, shorter), compression, {}), joined(random, ramp));
+    }
+}
+
+TEST(compressed_block, a_subblock_that_does_not_decode_to_its_size_makes_the_block_invalid)
+{
+    // Spec §10.6.1: each compressed subblock decompresses to exactly its uncompressed size, a byte short or long here.
+    const std::vector<std::byte> ramp = openxisf::test::pattern(1000);
+    for (const compression_codec codec : all_codecs) {
+        SCOPED_TRACE(name_of(codec));
+        const std::vector<std::byte> stored = codec_output(codec, ramp);
+        for (const std::uint64_t declared : {std::uint64_t{999}, std::uint64_t{1001}}) {
+            EXPECT_TRUE(throws<openxisf::integrity_error>(errc::corrupt_compressed_data, [&stored, codec, declared] {
+                (void)decompress_block(stored, {.codec = codec, .uncompressed_size = declared}, {});
+            })) << declared;
+        }
+    }
 }
 
 TEST(compressed_block, a_block_within_the_subblock_size_has_no_subblocks)
@@ -394,6 +474,45 @@ TEST(compressed_block, a_subblock_cannot_declare_more_than_its_codec_decodes_fro
             EXPECT_TRUE(std::string_view(failure.what()).starts_with("subblock 2 declares ")) << failure.what();
         }
         EXPECT_EQ(subblocks_of({.codec = entry.codec, .uncompressed_size = 1'000'000}, 1'000'000).size(), 1U);
+    }
+}
+
+TEST(compressed_block, a_zstd_block_cannot_declare_more_than_the_limit_of_its_expansion)
+{
+    // limits::max_zstd_expansion lowers the bound of the format, 32768 times the stored bytes. 9 stored bytes give at
+    // most 900 bytes under a limit of 100.
+    using openxisf::detail::check_zstd_expansion;
+    const auto zstd = [](std::uint64_t size) {
+        return block_compression{.codec = compression_codec::zstd, .uncompressed_size = size};
+    };
+    check_zstd_expansion(zstd(900), 9, 100);
+    check_zstd_expansion(zstd(0), 9, 100);
+    try {
+        check_zstd_expansion(zstd(901), 9, 100);
+        ADD_FAILURE() << "no error";
+    } catch (const openxisf::limit_error& failure) {
+        EXPECT_EQ(failure.code(), errc::zstd_expansion_too_large);
+        EXPECT_EQ(std::string_view(failure.what()),
+                  "the block declares 901 bytes, more than the limit of 100 times its stored size for Zstandard, "
+                  "900 bytes");
+    }
+    // 0 is no limit, and the other codecs have none.
+    check_zstd_expansion(zstd(294'912), 9, 0);
+    check_zstd_expansion({.codec = compression_codec::zlib, .uncompressed_size = 9288}, 9, 1);
+    check_zstd_expansion({.codec = compression_codec::lz4, .uncompressed_size = 2295}, 9, 1);
+    // The subblock that declares too much is named.
+    const block_compression divided{.codec = compression_codec::zstd,
+                                    .uncompressed_size = 3000,
+                                    .subblocks = {{.compressed_size = 1000, .uncompressed_size = 1000},
+                                                  {.compressed_size = 10, .uncompressed_size = 2000}}};
+    check_zstd_expansion(divided, 1010, 200);
+    EXPECT_TRUE(throws<openxisf::limit_error>(errc::zstd_expansion_too_large,
+                                              [&divided] { check_zstd_expansion(divided, 1010, 199); }));
+    try {
+        check_zstd_expansion(divided, 1010, 1);
+        ADD_FAILURE() << "no error";
+    } catch (const openxisf::limit_error& failure) {
+        EXPECT_TRUE(std::string_view(failure.what()).starts_with("subblock 2 declares 2000 bytes")) << failure.what();
     }
 }
 

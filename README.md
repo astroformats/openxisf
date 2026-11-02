@@ -2,16 +2,17 @@
 
 OpenXISF is a C++20 library for reading and writing XISF, the Extensible Image Serialization Format used by
 PixInsight. It is written from the published specification and aims at full conformance with
-[XISF 1.0, Revision 1](https://pixinsight.com/doc/docs/XISF-1.0-spec/XISF-1.0-spec.html), with an API that does not
+[XISF 1.0, Revision 2](https://pixinsight.com/doc/docs/XISF-1.0-spec/XISF-1.0-spec.html), with an API that does not
 depend on any application.
 
-**Status: 1.0.1.** It reads and writes monolithic and distributed units, implements the algorithms that the
-specification defines, evaluates astrometric solutions, and reads signed units, whose signatures it returns without
-verifying them. The API is stable: from 1.0 on, only a new major version may break it. The ABI holds within a minor
-version: the shared library of each minor version has a soname of its own (`libopenxisf.so.1.0` for 1.0.x), so a
-program built against 1.0 is rebuilt to use 1.1. The Windows DLL has one name in every version (`openxisf.dll`,
-`libopenxisf.dll` with MinGW), so nothing keeps a program built against 1.0 from loading the DLL of 1.1 that it
-finds first: ship the DLL with the program.
+**Status: 1.1.0.** It reads and writes monolithic and distributed units, reads regions of interest of their images
+and writes them in place, implements the algorithms that the specification defines, evaluates astrometric solutions,
+and reads signed units, whose signatures it returns without verifying them. The API is stable: from 1.0 on, only a
+new major version may break it. The ABI holds within a minor version: the shared library of each minor version has a
+soname of its own (`libopenxisf.so.1.1` for 1.1.x), and from 1.1 on a DLL name of its own on Windows
+(`openxisf-1.1.dll`, `libopenxisf-1.1.dll` with MinGW, where 1.0 has `openxisf.dll` and `libopenxisf.dll`), so a
+program built against 1.0 is rebuilt to use 1.1. The import library keeps its name (`openxisf.lib`,
+`libopenxisf.dll.a`), so a program links as before.
 
 - **Reading.** `openxisf::reader` checks the header of a unit (the file structure, the XML, the root element, the
   elements of the specification and the references between them) and its data blocks (where each one is, how it is
@@ -20,8 +21,12 @@ finds first: ship the DLL with the program.
   type of the specification, and tables.
 - **Images.** Their geometry, sample format, colour space and other attributes; their pixel data, decompressed and in
   native byte order, in either storage model, into memory of the library or of the application, with progress and
-  cancellation; and what describes each image: FITS keywords, ICC profile, RGB working space, display function, colour
+  cancellation, whole or a region of interest alone, a box of pixels and a range of channels, into a larger buffer with
+  a pitch; and what describes each image: FITS keywords, ICC profile, RGB working space, display function, colour
   filter array, resolution and thumbnail.
+- **Writing in place.** `openxisf::editor` writes regions of the pixel data of a monolithic file where they are, from
+  any number of threads at once, and rewrites the checksums of the blocks it wrote; the writer reserves an image as
+  zeros for it, so that an output such as a stacked frame is filled region by region without being held whole.
 - **Distributed units.** A header file whose data blocks are in data blocks files (`.xisb`) or other files is read the
   same way: a resolver opens each file, by default only inside the directory of the header file, and the block index of
   each data blocks file is checked.
@@ -29,13 +34,16 @@ finds first: ship the DLL with the program.
   unit is read. Departures from the specification that are unambiguous and harmless are read with a warning, such as
   uppercase hexadecimal digits, codec and checksum algorithm names in another case, FITS keyword names padded with
   spaces, which are read without them, or control characters that XML 1.0 does not allow; what affects safety or the
-  meaning of the data is refused. A compressed block or subblock whose compressed and uncompressed sizes are equal is
-  read as stored, as PixInsight writes and reads such subblocks.
+  meaning of the data is refused. A compressed subblock whose compressed and uncompressed sizes are equal is read as
+  stored, and one longer than its data is decompressed, as Revision 2 of the specification defines (§10.6.1).
 - **Writing.** `openxisf::writer` writes the same model back: it checks a whole unit against the specification before
   it writes a byte of it (an astrometric solution only for the types of its properties), and writes its metadata,
   images, properties and tables, with every block uncompressed and without checksums unless asked otherwise, so that
   every XISF 1.0 decoder reads the result. On request it compresses blocks with zlib, LZ4, LZ4HC or Zstandard, with
-  byte shuffling and subblocks, adds checksums and generates UUIDs. It writes a monolithic file, or a distributed unit:
+  byte shuffling and in subblocks of 4 MiB, as PixInsight writes them since its version 1.9.6, which decoders
+  decompress in parallel and a region read decodes in part; a subblock that does not compress is stored as it is,
+  which takes a decoder of Revision 2, and `write_options::subblock_size` 0 compresses each block as a single
+  subblock. It adds checksums and generates UUIDs on request too. It writes a monolithic file, or a distributed unit:
   a header file and a data blocks file next to it. Files are replaced only once they are complete. What several images
   share is written for each of them, without `uid` attributes or `Reference` elements.
 - **Signed units.** A unit whose header has an XML signature after its root element is read like any other, and its
@@ -71,6 +79,7 @@ hexadecimal data, UUIDs and time stamps.
 | Compression: zlib, LZ4, LZ4HC, Zstandard, with byte shuffling and subblocks | Yes | Yes |
 | Properties: scalars, complex numbers, strings, time points, vectors, matrices, tables | Yes | Yes |
 | Images: every sample format, planar and normal storage, both byte orders | Yes | Yes, in little-endian byte order |
+| Regions of interest: a subarea of an image read into a buffer with a pitch, and written in place | Yes | Yes, through `openxisf::editor`, into uncompressed attached blocks |
 | Ancillary elements: FITS keywords, ICC profile, RGB working space, display function, color filter array, resolution, thumbnail | Yes | Yes |
 | Colour transformations (Annex B), display functions and their adaptive algorithm, orientation, property format rendering | Yes | Yes |
 | Astrometric solutions: every projection system and layer, evaluated in both directions | Yes | Kept as given |
@@ -99,14 +108,15 @@ and the suites of `tests/` that cover it. Every row has passing tests.
 | §9.3–9.4 | Header files; data blocks files and block index | ✓ | ✓ | `unit/blocks_file`, `conformance/distributed` |
 | §9.5 | XML declaration, initial comment, root element, namespaces, extension elements | ✓ | ✓ | `conformance/header`, `conformance/writer` |
 | §9.5 | Detached XML signature handling | ✓ | – | `conformance/signature` |
-| §9.6 | File name suffixes | – | ✓ | `conformance/writer`, `conformance/distributed` |
+| §9.6 | File name suffixes: `.xish` and `.xisb` of a distributed unit, whose header file names its data blocks file; a monolithic file takes the name that the application gives it | – | ✓ | `conformance/distributed`, `conformance/writer` |
 | §10.1–10.3 | Block location forms, parenthesis rule, attachment bounds | ✓ | ✓ | `unit/block_attributes`, `unit/data_block`, `conformance/writer`, `conformance/distributed` |
 | §10.4 | Byte order attribute | ✓ | ✓ | `conformance/byte_order`, `conformance/writer` |
 | §10.5 | Checksum algorithms, digest rules, verification before use | ✓ | ✓ | `unit/hash`, `conformance/checksum`, `conformance/writer` |
 | §10.6 | Compression attribute, unsupported codec, subblocks | ✓ | ✓ | `unit/codecs`, `unit/compressed_block`, `conformance/writer` |
-| §10.6.1 | Digest over compressed data; no decompression after a failed check | ✓ | ✓ | `conformance/checksum`, `conformance/compression`, `conformance/writer` |
-| §10.6.2 | Byte shuffling including the tail bytes | ✓ | ✓ | `unit/shuffle`, `conformance/writer` |
-| §10.6.3–10 | zlib, LZ4, LZ4HC and Zstandard formats, with and without shuffling | ✓ | ✓ | `unit/codecs`, `samples`, `conformance/writer` |
+| §10.6.1 | Uncompressed subblocks (Revision 2): equal sizes mean data stored as they are, written so when the codec would not shorten them and copied on reading; longer subblocks decompressed; every decompressed length verified | ✓ | ✓ | `unit/compressed_block`, `conformance/compression`, `conformance/baseline_decoder`, `conformance/writer` |
+| §10.6.2 | Digest over compressed data; no decompression after a failed check | ✓ | ✓ | `conformance/checksum`, `conformance/compression`, `conformance/writer` |
+| §10.6.3 | Byte shuffling including the tail bytes | ✓ | ✓ | `unit/shuffle`, `conformance/writer` |
+| §10.6.4–11 | zlib, LZ4, LZ4HC and Zstandard formats, with and without shuffling | ✓ | ✓ | `unit/codecs`, `samples`, `conformance/writer` |
 | §11 | `uid` grammar and uniqueness; core element names case-sensitive | ✓ | – | `conformance/header` |
 | §11.1 | Property element placement and serialization by type | ✓ | ✓ | `conformance/property_element`, `conformance/writer`, `conformance/writer_validation` |
 | §11.2–11.3 | Structure, Field, Table, Row, Cell | ✓ | ✓ | `conformance/table`, `conformance/writer`, `conformance/writer_validation` |
@@ -124,6 +134,7 @@ and the suites of `tests/` that cover it. Every row has passing tests.
 | §11.12 | Thumbnail restrictions | ✓ | ✓ | `conformance/thumbnail`, `conformance/writer`, `conformance/writer_validation` |
 | §11.13 | Reference, no chained references, root-level image references | ✓ | – | `conformance/reference` |
 | Annex B | RGB ↔ XYZ ↔ L\*a\*b\*, grayscale component | ✓ | ✓ | `unit/color` |
+| – | Regions of interest, outside the specification: a box of pixels and a range of channels read alone, into a buffer with a pitch, and written in place, with the checksums of the blocks written | ✓ | ✓ | `unit/pixel_region`, `unit/pixel_layout`, `unit/pixels`, `unit/pixel_writes`, `unit/device_io`, `unit/data_block`, `conformance/image`, `conformance/editor`, `conformance/writer`, `concurrency/pixels`, `concurrency/editor`, `fuzz/roundtrip` |
 
 ## Requirements and platforms
 
@@ -162,16 +173,19 @@ the checks of a sanitizer's allocator. The `package` tests install the library i
 configure, build and run a consumer against it, in the configuration of the run with a multi-configuration generator
 (`ctest -C Debug`), and check the versions that the package accepts.
 
-Other presets run the tests under analysis tools: `linux-gcc-asan`, `linux-clang-asan` and `msvc-asan` (AddressSanitizer;
-the Linux ones add UndefinedBehaviorSanitizer), `linux-clang-tsan` (ThreadSanitizer), `linux-clang-tsan-tbb`
-(ThreadSanitizer with oneTBB, over dependencies that vcpkg builds with the instrumentation) and `linux-gcc-coverage`.
-`linux-clang-fuzz` builds the fuzz targets with libFuzzer, and its tests fuzz each target for a minute, starting from the
-seeds in `fuzz/seeds`. The other presets run those seeds once, as a regression test.
+Other presets run the tests under analysis tools: `linux-gcc-asan`, `linux-clang-asan` and `msvc-asan`
+(AddressSanitizer; the Linux ones add UndefinedBehaviorSanitizer), `linux-clang-tsan` (ThreadSanitizer),
+`linux-clang-tsan-tbb` (ThreadSanitizer with oneTBB, over dependencies that vcpkg builds with the instrumentation) and
+`linux-gcc-coverage`. `linux-clang-fuzz` builds the fuzz targets with libFuzzer, and its tests fuzz each target for a
+minute, starting from the seeds in `fuzz/seeds`. The other presets run those seeds once, as a regression test.
 
 `-DOPENXISF_BUILD_BENCHMARKS=ON` builds `openxisf_benchmarks`, which measures the codecs, byte shuffling, the
-checksums, the conversion between storage models, the opening of a large header, and the reading and writing of a
-100 MiB frame. Run it from a release build; its test runs every benchmark but those of the frame once, only to check
-that they work.
+checksums, the conversion between storage models, the opening of a large header, the reading and writing of a 100 MiB
+frame, and regions of interest: tiles of frames and the same tile of 32 frames, read from memory, from files that the
+system holds in its cache and from files read around that cache, as files not yet in memory are read, and a frame
+filled tile by tile through an editor. Run it from a release build; its test runs every benchmark but those of the
+frames once, only to check that they work. The benchmarks of the frames write about 16 GB of files to the directory of
+temporary files and hold as much in memory.
 
 ### Dependencies
 
@@ -185,8 +199,8 @@ that they work.
 - **MSYS2.** In the UCRT64 or CLANG64 shell, install `cmake`, `ninja`, `pkgconf`, `pugixml`, `zlib`, `lz4`, `zstd` and
   `gtest` with the matching `mingw-w64-<environment>-` prefix, plus the compiler, and `tbb` and `openssl` for the
   options that use them.
-- **macOS.** `brew install pkgconf pugixml lz4 zstd googletest`, and `tbb` and `openssl@3` for the options that use them,
-  then configure with `-DCMAKE_PREFIX_PATH="$(brew --prefix)"` (and `$(brew --prefix openssl@3)` for OpenSSL).
+- **macOS.** `brew install pkgconf pugixml lz4 zstd googletest`, and `tbb` and `openssl@3` for the options that use
+  them, then configure with `-DCMAKE_PREFIX_PATH="$(brew --prefix)"` (and `$(brew --prefix openssl@3)` for OpenSSL).
 
 The Visual Studio presets use Ninja, which needs the compiler environment: run them from a Developer PowerShell
 (or any shell where `cl` works). The MSYS2 presets run from the matching MSYS2 shell.
@@ -252,6 +266,57 @@ std::vector<T> samples(info.geometry.sample_count());
 file.read_pixels(0, std::span(samples),
                  {.storage = openxisf::pixel_storage::normal, .progress = progress_report()});
 ```
+
+A region of interest, a box of pixels and a range of channels, is read alone, into memory of the library or into a
+larger buffer of the application, its rows a pitch apart. `read_pixels.cpp` reads the central part of the first channel
+into a tile with a margin, as a filter that needs the neighbours of each pixel reads it:
+
+```cpp
+file.read_pixels(0, std::span(tile).subspan(start), {.region = region, .pitch = pitch});
+```
+
+Uncompressed data are read run by run, the stretches of the block that the region fills; compressed data subblock by
+subblock, those that hold the region, so a frame meant for region access is written in subblocks of a few MiB, the
+default of `write_options::subblock_size`, and without a checksum, which a reader verifies over the whole block first.
+`file.block(0)` tells which of these an image is before anything is read: where its block is, its codec, byte
+shuffling, largest subblock and checksum algorithm, and its sizes as stored and uncompressed. On a desktop with a
+PCIe 5 NVMe disk, the same 512 x 512 tile of 32 frames of 5120 x 5120 Float32 samples, from files not yet in memory, is
+read in 74 ms uncompressed, where the whole frames take 435 ms, and in 256 ms compressed with Zstandard and byte
+shuffling in subblocks of 4 MiB, where decoding the whole frames takes 870 ms on 16 threads.
+
+An output computed region by region is written in place: the writer reserves its image as zeros, and `openxisf::editor`
+writes each region where it belongs, from any number of threads at once for regions that share no sample, then writes
+the checksum of the frame in place with `commit()`. These excerpts of `samples/stack_regions.cpp` reserve a stacked
+frame, planar and with a checksum, and fill it tile by tile through one editor from several threads, each tile the mean
+of the same tile of every input frame:
+
+```cpp
+openxisf::writer reserved(
+    {.creator_application = "stack_regions sample 1.0", .checksum = openxisf::checksum_algorithm::sha256});
+reserved.add_reserved_image(frame_info());
+reserved.save(stacked);
+
+openxisf::editor output(stacked);
+stack(inputs, output);
+// The new checksum, written in place; until then a reader finds the frame corrupt.
+output.commit();
+```
+
+```cpp
+std::vector<float> sum(regions[k].sample_count(inputs.front().image(0).geometry));
+for (const openxisf::reader& input : inputs) {
+    const std::vector<float> region = input.read_pixels<float>(0, {.region = regions[k]});
+    for (std::size_t i = 0; i < sum.size(); ++i) {
+        sum[i] += region[i] / static_cast<float>(inputs.size());
+    }
+}
+output.write_pixels(0, std::span(sum), {.region = regions[k]});
+```
+
+The editor writes into uncompressed attached blocks, a reserved image among them, and refuses any other block with
+`openxisf::errc::not_editable`. A block written is checksummed again by `commit()`, and until then a reader finds it
+corrupt, so a frame left incomplete is not taken for a complete one. A planar image is the better one to fill by
+regions: in normal storage, a subset of the channels of a region is one write for each pixel.
 
 `samples/read_info.cpp` lists everything a unit holds: its metadata, its images with their properties, tables, FITS
 keywords and the elements that describe them, and the problems the reader found in it, `file.diagnostics()`. The reader
@@ -345,9 +410,8 @@ output.save(path);
 The writer checks the whole unit before it writes anything, and throws `openxisf::validation_error`, which names the
 element at fault, for anything that the specification forbids, but in an astrometric solution, whose properties it
 checks only for their types and keeps as given. The pixel data are borrowed until the last `save()`, which can also
-write to any `openxisf::output_sink`. `add_image()` takes them as bytes, or as a `std::span<const T>` of the type of
-the sample format, which `std::span(samples)` gives here since `samples` is const; a span of samples that are not const
-is given as `std::span<const float>(samples)`.
+write to any `openxisf::output_sink`. `add_image()` takes them as bytes, or as a span of the type of the sample format,
+const or not, such as `std::span(samples)` here.
 
 `save_distributed()` writes a distributed unit instead: a header file, and a data blocks file that the header locates
 relative to its own directory, so that the two can move together. A unit opened from a path finds its data blocks files
@@ -375,11 +439,12 @@ options.resolver =
 const openxisf::reader from_memory(std::make_unique<openxisf::memory_source>(header.release()), options);
 ```
 
-Units are read from an `openxisf::input_source` and written to an `openxisf::output_sink`. The library provides them for
-files (paths are UTF-8 on every platform, and a file is replaced only when it has been written completely), for memory,
-for functions of the application, and, in `<openxisf/stream_io.h>`, for C and C++ streams (`samples/stream_io.cpp`). An
-application can also implement them over its own storage; this is an excerpt of `samples/custom_io.cpp`, a source over
-the function table of a storage library written in C:
+Units are read from an `openxisf::input_source`, written to an `openxisf::output_sink`, and edited through an
+`openxisf::random_access_device`. The library provides them for files (paths are UTF-8 on every platform, and a file is
+replaced only when it has been written completely), for memory, for functions of the application, and, in
+`<openxisf/stream_io.h>`, for C and C++ streams (`samples/stream_io.cpp`). An application can also implement them over
+its own storage; this is an excerpt of `samples/custom_io.cpp`, a source over the function table of a storage library
+written in C:
 
 ```cpp
 #include <openxisf/openxisf.h>
@@ -408,7 +473,9 @@ private:
 ```
 
 A source reads exactly the bytes it is asked for, at the offset it is given, or throws. The library never asks for bytes
-beyond its size, and calls it from one thread at a time unless it declares concurrent reads.
+beyond its size, and calls it from one thread at a time unless it declares concurrent reads. A source whose content lies
+in memory, such as a file mapped into memory, can also give it with `bytes()`, as `memory_source` does: reads of regions
+then take what they need in place, without the reads and the copies that a file needs.
 
 ## Thread safety, errors and text
 
@@ -416,41 +483,48 @@ These rules hold throughout the API.
 
 - **Thread safety.** There is no mutable global state. The const member functions of a `reader` can be called from any
   number of threads at once, also to read pixels; `load_ancillary_data()`, the only one that changes it, needs exclusive
-  access. An `astrometric_solution` is immutable, and any number of threads can use it at once. Writers and values are
-  thread-compatible, like standard containers. The file and memory sources can be read from any number of threads at
-  once; the library calls a source that does not declare concurrent reads from one thread at a time. Built with oneTBB,
-  the library also works in parallel within one call, in the task arena of the calling thread and without changing the
-  global settings of oneTBB; sources, sinks and progress functions are still called from the calling thread. That work
-  is kept apart from the application's own oneTBB work: a cancelled task group of the application does not cancel it,
-  and a thread that waits for it runs none of the application's tasks meanwhile.
+  access. The region reads and writes of an `editor` run on any number of threads at once, for regions that share no
+  sample, each touching the bytes of its region alone, and `commit()` alone. A reader of a file that an editor changes
+  reads each region as it is then. An `astrometric_solution` is immutable, and any number of threads can use it at
+  once. Writers and values are thread-compatible, like standard containers. The file and memory sources can be read
+  from any number of threads at once, and the file and memory devices read and written; the library calls a source
+  that does not declare concurrent reads, or a device that does not declare concurrent writes, from one thread at a
+  time. Built with oneTBB, the library also works in parallel within one call, in the task arena of the calling thread
+  and without changing the global settings of oneTBB; sources, sinks and progress functions are still called from the
+  calling thread. That work is kept apart from the application's own oneTBB work: a cancelled task group of the
+  application does not cancel it, and a thread that waits for it runs none of the application's tasks meanwhile.
 - **Errors.** Failures are exceptions derived from `openxisf::error`, one class per kind of failure, each with an error
   code; besides them, `std::bad_alloc` when memory cannot be allocated, and the exceptions of the application's own
   sources, sinks, resolvers and progress functions, which pass through unchanged. A problem confined to one object of a
   unit, such as an unsupported codec, makes that object unavailable and is reported as a diagnostic, in
   `reader::diagnostics()`; the rest of the unit stays readable. Harmless deviations from the specification are
-  diagnostics too; a reader lists at most 10,000, the last of which then counts the problems that follow.
-  `read_options::strict` turns the problems that make an object unavailable into failures. A writer refuses a unit
-  that violates the specification with `openxisf::validation_error`, before it writes anything. A long read or save can
-  be cancelled from its progress function, which then throws `openxisf::cancelled_error`.
+  diagnostics too; a reader lists at most `limits::max_diagnostics`, 10,000 by default, the last of which then counts
+  the problems that follow. `read_options::strict` turns the problems that make an object unavailable into failures. A
+  writer refuses a unit that violates the specification with `openxisf::validation_error`, before it writes anything.
+  A long read or save can be cancelled from its progress function, which then throws `openxisf::cancelled_error`.
 - **Text.** The API carries text as UTF-8 in `std::string` and `std::string_view`, paths included, on every platform.
   Invalid UTF-8 is rejected.
 
 ## Security
 
-Report a vulnerability through GitHub's private vulnerability reporting, on the Security tab of the repository. Please do
-not open a public issue for it.
+Report a vulnerability through GitHub's private vulnerability reporting, on the Security tab of the repository. Please
+do not open a public issue for it.
 
 Files are untrusted input. The design goals are: every size and offset is overflow-checked and every block is
 bounds-checked; allocations are limited and configurable, and so are the size of the XML header, the nesting of its
-elements and their number, and the window of Zstandard data; checksums are verified before data is used, compressed
-data included, which are never decompressed when their checksum fails; decompression produces exactly the declared size
-or fails, and a compressed block cannot declare more than its codec can decode from its bytes; a document type
-declaration in the XML header is rejected; there is no network access; the paths of a distributed unit stay inside the
-directory of its header file, once symbolic links are followed, and open no device, and absolute paths and URLs are
-opened only by a resolver of the application. Inside is a matter of paths: a hard link or a mount point in that
-directory counts as inside. These goals are checked continuously by fuzzing, sanitizers and static analysis. The size
-of the header bounds the memory that an open takes, up to about 40 times for a header made of `Image` elements
-(`limits.h` gives the details), and a reader lists at most 10,000 diagnostics.
+elements, their number and that of the objects made of them, the elements of block indexes, and the window of Zstandard
+data; checksums are verified before data is used, compressed data included, which are never decompressed when their
+checksum fails; decompression produces exactly the declared size or fails, and a compressed block cannot declare more
+than its codec can decode from its bytes, nor a Zstandard block more than `limits::max_zstd_expansion` allows; a
+document type declaration in the XML header is rejected; there is no network access; the paths of a distributed unit
+stay inside the directory of its header file, once symbolic links are followed, the file read is the one whose path was
+checked, whatever another program does to the directories meanwhile, they open no device, and at most
+`limits::max_external_files` of them are open, 128 by default; absolute paths and URLs are opened only by a resolver of
+the application. Inside is a matter of paths: a hard link or a mount point in that directory counts as inside. These
+goals are checked continuously by fuzzing, sanitizers and static analysis. The size of the header bounds the memory that
+an open takes, up to about 45 times for a header made of `Image` elements, which `limits::max_model_objects` also bounds
+by their number (`limits.h` gives the details), and a reader lists at most `limits::max_diagnostics` diagnostics, 10,000
+by default.
 
 ## Contributing
 

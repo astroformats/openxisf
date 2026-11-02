@@ -3,14 +3,17 @@
 
 // Saves from several threads at once: of one writer, which its contract allows, since a writer is thread-compatible and
 // const members run concurrently, and of a writer for each thread, which share their pixel data. Each thread saves the
-// bytes of a save on one thread, which reads back as the model. ThreadSanitizer runs these tests in CI.
+// bytes of a save on one thread, which reads back as the model. Then editors, one for each thread, fill files of their
+// own. ThreadSanitizer runs these tests in CI.
 
+#include <openxisf/editor.h>
 #include <openxisf/image.h>
 #include <openxisf/io.h>
 #include <openxisf/reader.h>
 #include <openxisf/writer.h>
 
 #include "support/fixture_builder.h"
+#include "support/temp_directory.h"
 #include "support/threads.h"
 #include "support/written_unit.h"
 
@@ -20,6 +23,7 @@
 #include <cstdint>
 #include <exception>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace {
@@ -157,6 +161,42 @@ TEST(concurrency_writer, distributed_saves_of_one_writer_run_at_once)
         const openxisf::reader unit = openxisf::test::open_distributed(units[t], {.strict = true});
         EXPECT_EQ(unit.read_pixels<std::uint16_t>(0), model.samples) << "thread " << t;
         EXPECT_EQ(unit.properties(), output.properties()) << "thread " << t;
+    }
+}
+
+TEST(concurrency_writer, editors_of_their_own_fill_files_of_their_own_at_once)
+{
+    // Each thread saves the image reserved, with a checksum, to a file of its own, fills it through an editor in bands
+    // of rows, and commits it.
+    const image_model model;
+    const openxisf::test::temp_directory directory;
+    std::vector<std::exception_ptr> failures(thread_count);
+    openxisf::test::run_threads(thread_count, [&](std::size_t t) {
+        try {
+            const std::string path = directory.file("frame-" + std::to_string(t) + ".xisf");
+            openxisf::writer output({.creator_application = "OpenXISF tests 1.0",
+                                     .creation_time = openxisf::date_time{.year = 2026},
+                                     .checksum = openxisf::checksum_algorithm::sha256});
+            (void)output.add_reserved_image(model.image);
+            output.save(path);
+            openxisf::editor edit(path);
+            const std::span<const std::uint16_t> samples(model.samples);
+            for (std::uint64_t y = 0; y < 48; y += 16) {
+                // Rows y to y + 15 of the 64 x 48 frame, of every channel in normal storage.
+                edit.write_pixels(0, samples.subspan(y * 64 * 3, std::size_t{16} * 64 * 3),
+                                  {.storage = openxisf::pixel_storage::normal,
+                                   .region = openxisf::pixel_region{.origin = {0, y}, .size = {64, 16}}});
+            }
+            edit.commit();
+        } catch (...) {
+            failures[t] = std::current_exception();
+        }
+    });
+    for (std::size_t t = 0; t < thread_count; ++t) {
+        EXPECT_FALSE(failures[t]) << "thread " << t;
+        const openxisf::reader unit(directory.file("frame-" + std::to_string(t) + ".xisf"), {.strict = true});
+        EXPECT_EQ(unit.read_pixels<std::uint16_t>(0, {.storage = openxisf::pixel_storage::normal}), model.samples)
+            << "thread " << t;
     }
 }
 

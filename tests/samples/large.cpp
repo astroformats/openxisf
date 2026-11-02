@@ -6,6 +6,8 @@
 // compressed with zlib, in subblocks of its own choice (spec §10.6).
 
 #include <openxisf/io.h>
+#include <openxisf/reader.h>
+#include <openxisf/writer.h>
 
 #include "codec/compression.h"
 #include "container/data_block.h"
@@ -25,6 +27,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -59,19 +62,35 @@ double sample_at(const std::vector<std::byte>& pixels, std::size_t index)
     return static_cast<double>(std::bit_cast<float>(bits));
 }
 
-TEST(samples_large, l1_decompresses_with_the_subblocks_of_pixinsight)
+// The path of the file of L1, or why it is not there.
+struct l1_file
+{
+    std::string path{};
+    std::string missing{};
+};
+
+l1_file find_l1()
 {
     const std::optional<std::string> directory = openxisf::test::environment_variable("OPENXISF_LARGE_SAMPLES_DIR");
     if (!directory) {
-        GTEST_SKIP() << "OPENXISF_LARGE_SAMPLES_DIR is not set";
+        return {.missing = "OPENXISF_LARGE_SAMPLES_DIR is not set"};
+    }
+    std::string path = *directory + "/" + std::string(openxisf::test::large_samples().front().file);
+    if (!std::filesystem::exists(openxisf::test::path_of(path))) {
+        return {.missing = path + " does not exist"};
+    }
+    return {.path = std::move(path)};
+}
+
+TEST(samples_large, l1_decompresses_with_the_subblocks_of_pixinsight)
+{
+    const l1_file found = find_l1();
+    if (!found.missing.empty()) {
+        GTEST_SKIP() << found.missing;
     }
     const openxisf::test::sample& l1 = openxisf::test::large_samples().front();
-    const std::string path = *directory + "/" + std::string(l1.file);
-    if (!std::filesystem::exists(openxisf::test::path_of(path))) {
-        GTEST_SKIP() << path << " does not exist";
-    }
 
-    const unit opened(std::make_unique<openxisf::file_source>(path), {.strict = true});
+    const unit opened(std::make_unique<openxisf::file_source>(found.path), {.strict = true});
     EXPECT_EQ(openxisf::test::block_paths(opened), l1.blocks);
     // The first subblock is as large as PixInsight makes a zlib subblock, and did not compress, so it is stored as it
     // is: its two sizes are equal.
@@ -101,6 +120,22 @@ TEST(samples_large, l1_decompresses_with_the_subblocks_of_pixinsight)
         const std::size_t y = (index % (width * height)) / width;
         EXPECT_LE(std::abs(sample_at(pixels, index) - expected_value(channel, x, y)), 1e-6) << "sample " << index;
     }
+}
+
+TEST(samples_large, the_block_of_l1_has_its_two_subblocks_the_first_one_the_largest)
+{
+    // The facts of the block come from the header, which a header-only open reads alone.
+    const l1_file found = find_l1();
+    if (!found.missing.empty()) {
+        GTEST_SKIP() << found.missing;
+    }
+    const openxisf::reader l1(found.path, {.strict = true, .header_only = true});
+    EXPECT_EQ(l1.block(0), (openxisf::block_info{.location = openxisf::block_location::attachment,
+                                                 .codec = openxisf::codec::zlib,
+                                                 .subblock_size = 4'294'967'294,
+                                                 .subblock_count = 2,
+                                                 .stored_size = 4'294'967'294 + 159'192'850,
+                                                 .uncompressed_size = std::uint64_t{width} * height * 3 * 4}));
 }
 
 } // namespace
